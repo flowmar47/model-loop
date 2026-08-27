@@ -28,6 +28,12 @@ from parse import (
 DEFAULT_TIMEOUT_S = 600
 ROLES = ("review", "build", "inspect")
 BENCHES = ("agy", "cursor", "claude", "codex")
+EFFORT_BENCHES = ("agy", "claude")
+EFFORT_SNAPSHOT = "2026-08-26"
+EFFORT_VALUES = {
+    "agy": frozenset({"low", "medium", "high"}),
+    "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
+}
 
 REQUIRED_HELP = {
     "agy": (
@@ -38,6 +44,8 @@ REQUIRED_HELP = {
         "--sandbox",
         "--print-timeout",
         "--dangerously-skip-permissions",
+        "--model",
+        "--effort",
     ),
     "cursor": (
         "--print",
@@ -47,6 +55,7 @@ REQUIRED_HELP = {
         "--sandbox",
         "--force",
         "--trust",
+        "--model",
     ),
     "claude": (
         "--print",
@@ -54,8 +63,17 @@ REQUIRED_HELP = {
         "--resume",
         "--permission-mode",
         "--dangerously-skip-permissions",
+        "--model",
+        "--effort",
     ),
-    "codex": ("exec", "--sandbox", "--json", "--output-last-message", "resume"),
+    "codex": (
+        "exec",
+        "--sandbox",
+        "--json",
+        "--output-last-message",
+        "resume",
+        "--model",
+    ),
 }
 
 BINARIES = {
@@ -265,6 +283,47 @@ def write_text(path: Path, text: str) -> None:
         raise RivalError(f"failed to write {path}: {exc}") from exc
 
 
+def coerce_pin(flag: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise RivalError(
+            f"{flag} must be a non-empty string, got {value!r} — omit the flag or pass a value"
+        )
+    return value.strip()
+
+
+def apply_pins(
+    argv: list[str],
+    *,
+    bench: str,
+    model: str | None,
+    effort: str | None,
+) -> list[str]:
+    extra: list[str] = []
+    if model:
+        if bench == "codex":
+            extra.extend(("-m", model))
+        else:
+            extra.extend(("--model", model))
+    if effort:
+        if bench not in EFFORT_BENCHES:
+            raise RivalError(
+                f"{bench} has no --effort flag — omit --effort or use claude/agy"
+            )
+        known = EFFORT_VALUES[bench]
+        if effort not in known:
+            raise RivalError(
+                f"{bench} --effort {effort!r} is not in {sorted(known)} "
+                f"(known values as of {EFFORT_SNAPSHOT}; if your CLI's --help "
+                f"lists this value, update the enum in rival.py)"
+            )
+        extra.extend(("--effort", effort))
+    if not extra:
+        return argv
+    return argv[:-1] + extra + [argv[-1]]
+
+
 def build_argv(
     *,
     bench: str,
@@ -273,6 +332,8 @@ def build_argv(
     prompt: str,
     session_id: str | None,
     last_message: Path | None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> tuple[list[str], bytes | None, bool]:
     """Return (argv, stdin_bytes, close_stdin). close_stdin True → DEVNULL."""
     resume = session_id is not None
@@ -286,7 +347,7 @@ def build_argv(
         if resume:
             argv.extend(("--conversation", session_id or ""))
         argv.append(prompt)
-        return argv, None, True
+        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
     if bench == "cursor":
         argv = [binary, "-p", "--output-format", "json", "--trust"]
         if write_role:
@@ -296,7 +357,7 @@ def build_argv(
         if resume:
             argv.extend(("--resume", session_id or ""))
         argv.append(prompt)
-        return argv, None, True
+        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
     if bench == "claude":
         argv = [binary, "-p", "--output-format", "json", "--disable-slash-commands", "--no-chrome"]
         if write_role:
@@ -306,7 +367,7 @@ def build_argv(
         if resume:
             argv.extend(("--resume", session_id or ""))
         argv.append(prompt)
-        return argv, None, True
+        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
     if bench == "codex":
         if last_message is None:
             raise RivalError("codex requires a last-message path")
@@ -323,7 +384,7 @@ def build_argv(
                 argv.extend(("resume", session_id or "", "-"))
             else:
                 argv.append("-")
-            return argv, prompt.encode("utf-8"), False
+            return apply_pins(argv, bench=bench, model=model, effort=effort), prompt.encode("utf-8"), False
         if resume:
             argv = [
                 binary,
@@ -348,7 +409,7 @@ def build_argv(
                 str(last_message),
                 prompt,
             ]
-        return argv, None, True
+        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
     raise RivalError(f"unknown bench {bench}")
 
 
@@ -368,6 +429,8 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         binary = str(state["binary"])
         rounds = int(state.get("rounds", 0)) + 1
         started_at = str(state.get("started_at") or utc_now())
+        model = coerce_pin("--model", args.model) or coerce_pin("--model", state.get("model"))
+        effort = coerce_pin("--effort", args.effort) or coerce_pin("--effort", state.get("effort"))
     else:
         bench = args.bench
         role = args.role
@@ -377,6 +440,8 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
             raise RivalError(f"unknown role {role}")
         if state_path.exists():
             raise RivalError(f"refusing to overwrite state {state_path} — use resume")
+        model = coerce_pin("--model", args.model)
+        effort = coerce_pin("--effort", args.effort)
         binary, note = resolve_binary(bench)
         if binary is None:
             raise RivalError(f"{bench} CLI not found: {note}")
@@ -400,6 +465,8 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         prompt=prompt,
         session_id=session_id,
         last_message=last_message,
+        model=model if isinstance(model, str) else None,
+        effort=effort if isinstance(effort, str) else None,
     )
     result = run_command(
         argv,
@@ -431,6 +498,8 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
             "bench": bench,
             "binary": binary,
             "cwd": str(cwd),
+            "effort": effort if isinstance(effort, str) else None,
+            "model": model if isinstance(model, str) else None,
             "role": role,
             "rounds": rounds,
             "session_id": new_session,
@@ -443,6 +512,8 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         json.dumps(
             {
                 "bench": bench,
+                "effort": effort if isinstance(effort, str) else None,
+                "model": model if isinstance(model, str) else None,
                 "ok": True,
                 "out": str(out_path),
                 "role": role,
@@ -499,12 +570,23 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--prompt-file", required=True)
     start.add_argument("--out", required=True)
     start.add_argument("--state", required=True)
+    start.add_argument("--model", help="pass through to the spawned CLI; omit to use its default")
+    start.add_argument(
+        "--effort",
+        help="claude: low|medium|high|xhigh|max; agy: low|medium|high",
+    )
     start.set_defaults(func=lambda a: run_round(a, resume=False))
 
     resume = sub.add_parser("resume", help="resume the exact stored session")
     resume.add_argument("--prompt-file", required=True)
     resume.add_argument("--out", required=True)
     resume.add_argument("--state", required=True)
+    resume.add_argument("--model", help="override pinned model; default is the stored pin")
+    resume.add_argument(
+        "--effort",
+        help="override pinned effort; default is the stored pin "
+        "(claude: low|medium|high|xhigh|max; agy: low|medium|high)",
+    )
     resume.set_defaults(func=lambda a: run_round(a, resume=True))
     return parser
 

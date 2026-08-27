@@ -1,10 +1,9 @@
 # Bench adapters
 
 `scripts/rival.py` is the source of truth. This file exists so an agent can recover
-when the script is missing, and so a human can see what will run. Flags below were
-verified against the CLIs installed when this skill was authored (agy 1.1.19,
-Cursor CLI docs 2026-08, Claude Code 2.1.243, Codex 0.149.1). Re-run `rival.py doctor`
-after upgrades; do not trust this page over `--help`.
+when the script is missing, and so a human can see what will run. Re-run
+`rival.py doctor` and the CLI's own `--help` after upgrades; do not trust this
+page over either.
 
 Never pin `--model` / `-m` unless the user asked. Never resume with `--continue` or
 `--last`. Always keep an explicit session id in the state file.
@@ -12,6 +11,29 @@ Never pin `--model` / `-m` unless the user asked. Never resume with `--continue`
 Timeouts: 10 minutes per round. Codex `exec` reads stdin *in addition to* a prompt
 argument — under a non-TTY driver that hangs forever unless stdin is closed
 (`< /dev/null` / `stdin=DEVNULL`).
+
+Spawned CLIs inherit the planner's environment. A dead
+`ANTHROPIC_BASE_URL=http://127.0.0.1:8787` (nothing listening) fails Claude with
+connection refused. Retry cleanly:
+
+```bash
+env -u ANTHROPIC_BASE_URL -u OPENAI_BASE_URL python3 ~/.agents/skills/model-loop/scripts/rival.py …
+```
+
+## Model and effort pass-through
+
+`rival.py start|resume` accept `--model` and `--effort`. They persist in the
+session state so resume replays them.
+
+| Bench    | Model flag | Effort |
+|----------|------------|--------|
+| `agy`    | `--model`  | `--effort` `low\|medium\|high` (snapshot 2026-08-26) |
+| `claude` | `--model`  | `--effort` `low\|medium\|high\|xhigh\|max` (snapshot 2026-08-26) |
+| `cursor` | `--model`  | none — `--effort` is rejected. **Unverified against an installed binary** (author machine has a dangling `agent` symlink). Confirm with `agent --help`. |
+| `codex`  | `-m`       | none — `--effort` is rejected on purpose. `codex exec --help` has `-m`/`--model` and generic `-c`, not `--effort`. Do not invent `model_reasoning_effort`. |
+
+Unknown effort values fail in the adapter (`RivalError`) with the snapshot date.
+If your CLI's `--help` lists a new value, update the enum in `rival.py`.
 
 ## Review / inspect (read-only)
 
@@ -65,8 +87,7 @@ codex exec resume "$ID" -c sandbox_mode="read-only" --json \
 ```
 
 Session id: JSONL line `{"type":"thread.started","thread_id":"..."}`.
-Last message: `-o` file. `--yolo` is **not** a current `codex exec` flag
-(0.149.1); do not use it.
+Last message: `-o` file. Do not use `--yolo` on `codex exec`.
 
 ## Build (write)
 
@@ -105,6 +126,7 @@ Run from the repo root (`resume` has no `-C`).
 ## Doctor checks
 
 `rival.py doctor` confirms each binary exists, `--help` contains the flags the
-adapter needs, and (where cheap) that the CLI is authenticated. A dangling
-`~/.local/bin/agent` symlink is a Cursor CLI miss — reinstall with
-`curl https://cursor.com/install -fsS | bash` only if the user asks.
+adapter needs (including `--model`, and `--effort` on agy/claude), and (where
+cheap) that the CLI is authenticated. A dangling `~/.local/bin/agent` symlink is
+a Cursor CLI miss — reinstall with `curl https://cursor.com/install -fsS | bash`
+only if the user asks.
