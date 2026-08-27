@@ -36,6 +36,7 @@ Specialized cousins: original Claude-primary loop is claudex-loop; Codex-primary
 Claude-reviewer is `clodex-loop`. This skill is the general case.
 
 Read [adapters.md](adapters.md) only when `rival.py` is missing or a bench's doctor fails.
+Read [CONTEXT.md](CONTEXT.md) for planner / rival / bench / harness / skill directory.
 Read [CONTEXT-FORMAT.md](CONTEXT-FORMAT.md) / [ADR-FORMAT.md](ADR-FORMAT.md) when those
 files are created.
 
@@ -54,11 +55,14 @@ Detect yourself when the environment is obvious (`CURSOR_AGENT` → cursor, `CLA
 uncertain, state your best guess in one line and continue — do not block Phase 0 on a
 naming debate, and do not ask the user to "choose a planner."
 
-Echo versions from:
+Resolve `<skill-dir>` to the directory of the `SKILL.md` you loaded (clone
+default: `~/.agents/skills/model-loop`). Echo versions from:
 
 ```bash
-python3 ~/.agents/skills/model-loop/scripts/rival.py doctor
+python3 <skill-dir>/scripts/rival.py doctor
 ```
+
+Clone-default equivalent: `python3 ~/.agents/skills/model-loop/scripts/rival.py doctor`.
 
 If the user already named a reviewer (`reviewer=agy`, "have Codex review", …), use it.
 Otherwise ask once, with a recommendation:
@@ -89,7 +93,9 @@ Tunables (args override defaults):
 | `PROOF_CMD` | from spec | Exact command that counts as proof |
 
 Echo resolved benches, CLI versions, and tunables. If the user objects, stop before
-burning a review round. Pin no `--model` unless they asked.
+burning a review round. Pin no `--model` unless they asked. When they did, pass
+`--model` and `--effort` through `rival.py start|resume` (effort is claude/agy
+only). Do not invent CLI flags.
 
 Run directory for session state (not part of the implementation diff):
 
@@ -208,7 +214,7 @@ Hand the locked plan to the reviewer bench. **Execute `scripts/rival.py`; do not
 CLI flags.** Prompt body: [prompts/review.md](prompts/review.md).
 
 ```bash
-python3 ~/.agents/skills/model-loop/scripts/rival.py start \
+python3 <skill-dir>/scripts/rival.py start \
   --bench "$REVIEWER" --role review \
   --prompt-file "$RUN_DIR/review-prompt.txt" \
   --out "$RUN_DIR/review-round-1.txt" \
@@ -258,7 +264,7 @@ Write the build contract to a temp file (goal, spec path, key paths, constraints
 non-goals, `PROOF_CMD`). Then:
 
 ```bash
-python3 ~/.agents/skills/model-loop/scripts/rival.py start \
+python3 <skill-dir>/scripts/rival.py start \
   --bench "$BUILDER" --role build \
   --prompt-file "$RUN_DIR/build-prompt.txt" \
   --out "$RUN_DIR/build-round-1.txt" \

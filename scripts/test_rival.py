@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -164,6 +167,140 @@ class ArgvTests(unittest.TestCase):
         self.assertIn("--dangerously-skip-permissions", argv)
         self.assertNotIn("plan", argv)
 
+    def test_claude_pins_model_and_effort_before_prompt(self) -> None:
+        argv, _, _ = rival.build_argv(
+            bench="claude",
+            binary="/bin/claude",
+            role="review",
+            prompt="look at PLAN.md",
+            session_id=None,
+            last_message=None,
+            model="fable",
+            effort="xhigh",
+        )
+        self.assertEqual(argv[-1], "look at PLAN.md")
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "fable")
+        self.assertIn("--effort", argv)
+        self.assertEqual(argv[argv.index("--effort") + 1], "xhigh")
+
+    def test_cursor_rejects_effort(self) -> None:
+        with self.assertRaises(rival.RivalError):
+            rival.build_argv(
+                bench="cursor",
+                binary="/bin/agent",
+                role="review",
+                prompt="look",
+                session_id=None,
+                last_message=None,
+                effort="xhigh",
+            )
+
+    def test_codex_rejects_effort(self) -> None:
+        with self.assertRaises(rival.RivalError):
+            rival.build_argv(
+                bench="codex",
+                binary="/bin/codex",
+                role="review",
+                prompt="look",
+                session_id=None,
+                last_message=Path("/tmp/last.txt"),
+                effort="high",
+            )
+
+    def test_agy_rejects_xhigh_effort(self) -> None:
+        with self.assertRaises(rival.RivalError) as ctx:
+            rival.build_argv(
+                bench="agy",
+                binary="/bin/agy",
+                role="review",
+                prompt="look",
+                session_id=None,
+                last_message=None,
+                effort="xhigh",
+            )
+        self.assertIn("update the enum in rival.py", str(ctx.exception))
+
+    def test_claude_required_help_includes_effort(self) -> None:
+        self.assertIn("--effort", rival.REQUIRED_HELP["claude"])
+        self.assertIn("--model", rival.REQUIRED_HELP["claude"])
+
+    def test_codex_pins_model_as_dash_m(self) -> None:
+        argv, _, _ = rival.build_argv(
+            bench="codex",
+            binary="/bin/codex",
+            role="review",
+            prompt="look",
+            session_id=None,
+            last_message=Path("/tmp/last.txt"),
+            model="gpt-5",
+        )
+        self.assertEqual(argv[-1], "look")
+        self.assertIn("-m", argv)
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5")
+        self.assertNotIn("--model", argv)
+
+    def test_cursor_accepts_model(self) -> None:
+        argv, _, _ = rival.build_argv(
+            bench="cursor",
+            binary="/bin/agent",
+            role="review",
+            prompt="look",
+            session_id=None,
+            last_message=None,
+            model="composer",
+        )
+        self.assertEqual(argv[-1], "look")
+        self.assertEqual(argv[argv.index("--model") + 1], "composer")
+
+    def test_empty_effort_is_rejected(self) -> None:
+        with self.assertRaises(rival.RivalError):
+            rival.coerce_pin("--effort", "")
+
+    def test_pin_whitespace_is_stripped(self) -> None:
+        self.assertEqual(rival.coerce_pin("--model", "  fable  "), "fable")
+
+    def test_empty_model_flag_fails_before_spawn(self) -> None:
+        spawned: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            spawned.append(list(argv))
+            return subprocess.CompletedProcess(list(argv), 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    rival, "resolve_binary", return_value=("/fake/claude", None)
+                ),
+                mock.patch.object(rival, "run_command", side_effect=fake_run),
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO),
+            ):
+                rc = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "claude",
+                        "--role",
+                        "review",
+                        "--model",
+                        "",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(root / "out.txt"),
+                        "--state",
+                        str(root / "state.json"),
+                    ]
+                )
+        self.assertEqual(rc, 1)
+        self.assertEqual(spawned, [])
+
 
 class DetectTests(unittest.TestCase):
     def test_unknown_without_markers(self) -> None:
@@ -195,6 +332,80 @@ class StateTests(unittest.TestCase):
             path.write_text("old", encoding="utf-8")
             with self.assertRaises(rival.RivalError):
                 rival.write_text(path, "new")
+
+    def test_resume_replays_stored_pins(self) -> None:
+        captured: list[list[str]] = []
+        claude_json = json.dumps(
+            {
+                "type": "result",
+                "session_id": "sess-1",
+                "result": "ok\nVERDICT: APPROVED",
+            }
+        )
+
+        def fake_run(argv, **_kwargs):
+            captured.append(list(argv))
+            stdout = "2.1.243\n" if "--version" in argv else claude_json
+            return subprocess.CompletedProcess(list(argv), 0, stdout=stdout, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            state = root / "state.json"
+            out1 = root / "round-1.txt"
+            out2 = root / "round-2.txt"
+            with (
+                mock.patch.object(
+                    rival, "resolve_binary", return_value=("/fake/claude", None)
+                ),
+                mock.patch.object(rival, "run_command", side_effect=fake_run),
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO) as buf,
+            ):
+                start_rc = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "claude",
+                        "--role",
+                        "review",
+                        "--model",
+                        "fable",
+                        "--effort",
+                        "xhigh",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(out1),
+                        "--state",
+                        str(state),
+                    ]
+                )
+                resume_rc = rival.main(
+                    [
+                        "resume",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(out2),
+                        "--state",
+                        str(state),
+                    ]
+                )
+        self.assertEqual(start_rc, 0)
+        self.assertEqual(resume_rc, 0)
+        start_spawn = next(argv for argv in captured if "-p" in argv)
+        resume_spawn = next(argv for argv in reversed(captured) if "-p" in argv)
+        self.assertNotEqual(start_spawn, resume_spawn)
+        self.assertEqual(start_spawn[start_spawn.index("--model") + 1], "fable")
+        self.assertEqual(start_spawn[start_spawn.index("--effort") + 1], "xhigh")
+        self.assertEqual(resume_spawn[resume_spawn.index("--model") + 1], "fable")
+        self.assertEqual(resume_spawn[resume_spawn.index("--effort") + 1], "xhigh")
+        printed = json.loads(buf.getvalue().splitlines()[-1])
+        self.assertEqual(printed["model"], "fable")
+        self.assertEqual(printed["effort"], "xhigh")
 
 
 if __name__ == "__main__":
