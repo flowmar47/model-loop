@@ -97,10 +97,11 @@ burning a review round. Pin no `--model` unless they asked. When they did, pass
 `--model` and `--effort` through `rival.py start|resume` (effort is claude/agy
 only). Do not invent CLI flags.
 
-Run directory for session state (not part of the implementation diff):
+Run directory for session state (not part of the implementation diff). `git rev-parse`
+only prints the path — create it before writing prompt files into it:
 
 ```bash
-git rev-parse --git-path model-loop 2>/dev/null || mktemp -d
+RUN_DIR="$(git rev-parse --git-path model-loop 2>/dev/null || mktemp -d)" && mkdir -p "$RUN_DIR"
 ```
 
 Record that path in `LOG_FILE`. `PLAN_FILE` and `LOG_FILE` stay at the repo root.
@@ -211,7 +212,8 @@ Initialize `LOG_FILE` with the task, benches, versions, run directory, and `MAX_
 ## PHASE 2 — REVIEW (this session ↔ rival)
 
 Hand the locked plan to the reviewer bench. **Execute `scripts/rival.py`; do not invent
-CLI flags.** Prompt body: [prompts/review.md](prompts/review.md).
+CLI flags.** Prompt body: [prompts/review.md](prompts/review.md) — if `PLAN_FILE` is not
+`PLAN.md`, substitute the real path in the prompt body.
 
 ```bash
 python3 <skill-dir>/scripts/rival.py start \
@@ -230,10 +232,14 @@ and tell the user; do not retry blind.
 Each round:
 
 1. Append `## Round N — <bench>` + the full critique to `LOG_FILE`.
-2. Last non-empty line:
+2. Read the `verdict` field of the JSON `rival.py` printed (it strips trailing code
+   fences — trust it over eyeballing the transcript):
    - `VERDICT: APPROVED` → Resolution.
    - `VERDICT: REVISE` → this session is final arbiter. Incorporate good critiques,
      reject bad ones *with a logged reason*. Revise `PLAN_FILE`. Increment round.
+   - `null` (the rival omitted the verdict line) → `resume` the same state once,
+     asking only for the missing `VERDICT:` line. Still null → treat as REVISE and
+     log the omission. Neither retry counts as a new review round.
 3. Round > `MAX_ROUNDS` → Resolution (deadlock). Do not fake approval.
 
 **Resolution**
@@ -288,7 +294,15 @@ Then inspect (unless opted out).
 ### Post-build inspection (default on)
 
 Fresh **read-only** rival session — **not** the Phase 2 thread. Inspector ≠ builder's
-bench. Prompt: [prompts/inspect.md](prompts/inspect.md). Advisory; no verdict line.
+bench. Prompt: [prompts/inspect.md](prompts/inspect.md), with two lines appended so the
+inspector can bound the diff and check the proof claim:
+
+```
+Base commit: <BASE_COMMIT>
+Proof command: <PROOF_CMD>
+```
+
+Substitute `PLAN_FILE` as in Phase 2. Advisory; no verdict line.
 
 Arbitrate each finding: accept (fix, rerun affected proof) or reject with a logged
 reason. Cap at `MAX_INSPECTION_ROUNDS`. Append `## Post-build inspection` to `LOG_FILE`.

@@ -127,6 +127,48 @@ class ArgvTests(unittest.TestCase):
         self.assertFalse(close)
         self.assertEqual(stdin, b"implement")
 
+    def test_codex_build_resume_puts_flags_after_subcommand(self) -> None:
+        argv, stdin, close = rival.build_argv(
+            bench="codex",
+            binary="/bin/codex",
+            role="build",
+            prompt="fix it",
+            session_id="thr_1",
+            last_message=Path("/tmp/last.txt"),
+        )
+        self.assertEqual(argv[1:4], ["exec", "resume", "thr_1"])
+        self.assertGreater(
+            argv.index("--dangerously-bypass-approvals-and-sandbox"),
+            argv.index("resume"),
+        )
+        self.assertEqual(argv[-1], "-")
+        self.assertFalse(close)
+        self.assertEqual(stdin, b"fix it")
+
+    def test_agy_print_timeout_follows_timeout(self) -> None:
+        argv, _, _ = rival.build_argv(
+            bench="agy",
+            binary="/bin/agy",
+            role="review",
+            prompt="look",
+            session_id=None,
+            last_message=None,
+            timeout_s=1200,
+        )
+        self.assertEqual(argv[argv.index("--print-timeout") + 1], "20m")
+
+    def test_agy_print_timeout_odd_seconds(self) -> None:
+        argv, _, _ = rival.build_argv(
+            bench="agy",
+            binary="/bin/agy",
+            role="review",
+            prompt="look",
+            session_id=None,
+            last_message=None,
+            timeout_s=90,
+        )
+        self.assertEqual(argv[argv.index("--print-timeout") + 1], "90s")
+
     def test_agy_review_is_plan_sandbox_not_skip_permissions(self) -> None:
         argv, _, _ = rival.build_argv(
             bench="agy",
@@ -323,6 +365,41 @@ class DetectTests(unittest.TestCase):
             for key, value in saved.items():
                 if value is not None:
                     os.environ[key] = value
+
+
+class DoctorTests(unittest.TestCase):
+    def test_full_sweep_not_ok_when_every_bench_fails(self) -> None:
+        broken = {
+            "auth": None,
+            "bench": "x",
+            "binary": None,
+            "missing_flags": [],
+            "note": "missing",
+            "ok": False,
+            "version": None,
+        }
+        with (
+            mock.patch.object(rival, "doctor_one", return_value=dict(broken)),
+            mock.patch.object(sys, "stdout", new_callable=io.StringIO) as buf,
+        ):
+            rc = rival.main(["doctor"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertFalse(payload["ok"])
+
+    def test_full_sweep_ok_when_one_bench_works(self) -> None:
+        reports = iter([False, True, False, False])
+
+        def fake_doctor(bench, _cwd):
+            return {"bench": bench, "ok": next(reports)}
+
+        with (
+            mock.patch.object(rival, "doctor_one", side_effect=fake_doctor),
+            mock.patch.object(sys, "stdout", new_callable=io.StringIO) as buf,
+        ):
+            rc = rival.main(["doctor"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(json.loads(buf.getvalue())["ok"])
 
 
 class StateTests(unittest.TestCase):

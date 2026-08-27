@@ -324,6 +324,10 @@ def apply_pins(
     return argv[:-1] + extra + [argv[-1]]
 
 
+def duration_string(seconds: int) -> str:
+    return f"{seconds // 60}m" if seconds % 60 == 0 else f"{seconds}s"
+
+
 def build_argv(
     *,
     bench: str,
@@ -334,12 +338,20 @@ def build_argv(
     last_message: Path | None,
     model: str | None = None,
     effort: str | None = None,
+    timeout_s: int = DEFAULT_TIMEOUT_S,
 ) -> tuple[list[str], bytes | None, bool]:
     """Return (argv, stdin_bytes, close_stdin). close_stdin True → DEVNULL."""
     resume = session_id is not None
     write_role = role == "build"
     if bench == "agy":
-        argv = [binary, "-p", "--output-format", "json", "--print-timeout", "10m"]
+        argv = [
+            binary,
+            "-p",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            duration_string(timeout_s),
+        ]
         if write_role:
             argv.append("--dangerously-skip-permissions")
         else:
@@ -372,18 +384,20 @@ def build_argv(
         if last_message is None:
             raise RivalError("codex requires a last-message path")
         if write_role:
-            argv = [
-                binary,
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--json",
-                "-o",
-                str(last_message),
-            ]
+            # Flags go after the `resume` subcommand, same as the read-only
+            # resume path and the verified commands in adapters.md.
+            argv = [binary, "exec"]
             if resume:
-                argv.extend(("resume", session_id or "", "-"))
-            else:
-                argv.append("-")
+                argv.extend(("resume", session_id or ""))
+            argv.extend(
+                (
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--json",
+                    "-o",
+                    str(last_message),
+                    "-",
+                )
+            )
             return apply_pins(argv, bench=bench, model=model, effort=effort), prompt.encode("utf-8"), False
         if resume:
             argv = [
@@ -467,6 +481,7 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         last_message=last_message,
         model=model if isinstance(model, str) else None,
         effort=effort if isinstance(effort, str) else None,
+        timeout_s=timeout,
     )
     result = run_command(
         argv,
@@ -531,10 +546,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).resolve()
     wanted = [args.bench] if args.bench else list(BENCHES)
     reports = [doctor_one(bench, cwd) for bench in wanted]
+    # Full sweep: ok means at least one bench is usable as a rival.
+    # Single bench: ok means that bench passed.
     print(
         json.dumps(
             {
-                "ok": all(item["ok"] for item in reports) if args.bench else True,
+                "ok": all(item["ok"] for item in reports)
+                if args.bench
+                else any(item["ok"] for item in reports),
                 "planner": detect_planner(),
                 "benches": reports,
             },

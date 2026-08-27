@@ -8,7 +8,8 @@ page over either.
 Never pin `--model` / `-m` unless the user asked. Never resume with `--continue` or
 `--last`. Always keep an explicit session id in the state file.
 
-Timeouts: 10 minutes per round. Codex `exec` reads stdin *in addition to* a prompt
+Timeouts: 10 minutes per round by default (`rival.py --timeout <seconds>`; agy's
+`--print-timeout` is derived from it). Codex `exec` reads stdin *in addition to* a prompt
 argument — under a non-TTY driver that hangs forever unless stdin is closed
 (`< /dev/null` / `stdin=DEVNULL`).
 
@@ -127,6 +128,8 @@ Run from the repo root (`resume` has no `-C`).
 
 `rival.py doctor` confirms each binary exists, `--help` contains the flags the
 adapter needs (including `--model`, and `--effort` on agy/claude), and (where
-cheap) that the CLI is authenticated. A dangling `~/.local/bin/agent` symlink is
+cheap) that the CLI is authenticated. On a full sweep the top-level `ok` means
+at least one bench is usable as a rival; pass `--bench <alias>` to gate on a
+specific one (exits non-zero on failure). A dangling `~/.local/bin/agent` symlink is
 a Cursor CLI miss — reinstall with `curl https://cursor.com/install -fsS | bash`
 only if the user asks.
