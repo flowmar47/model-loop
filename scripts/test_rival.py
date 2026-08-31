@@ -368,6 +368,65 @@ class DetectTests(unittest.TestCase):
 
 
 class DoctorTests(unittest.TestCase):
+    def test_doctor_requires_known_good_auth_for_every_bench(self) -> None:
+        for bench in rival.BENCHES:
+            with self.subTest(bench=bench):
+                with (
+                    mock.patch.object(
+                        rival, "resolve_binary", return_value=(f"/fake/{bench}", None)
+                    ),
+                    mock.patch.object(rival, "version_string", return_value="1.0"),
+                    mock.patch.object(
+                        rival,
+                        "help_text",
+                        return_value=" ".join(rival.REQUIRED_HELP[bench]),
+                    ),
+                    mock.patch.object(
+                        rival, "probe_auth", return_value=rival.AUTH_OK[bench]
+                    ),
+                ):
+                    report = rival.doctor_one(bench, Path.cwd())
+                self.assertTrue(report["ok"])
+
+    def test_doctor_rejects_unauthenticated_bench_with_all_flags(self) -> None:
+        with (
+            mock.patch.object(
+                rival, "resolve_binary", return_value=("/fake/claude", None)
+            ),
+            mock.patch.object(rival, "version_string", return_value="1.0"),
+            mock.patch.object(
+                rival,
+                "help_text",
+                return_value=" ".join(rival.REQUIRED_HELP["claude"]),
+            ),
+            mock.patch.object(rival, "probe_auth", return_value="logged_out"),
+        ):
+            report = rival.doctor_one("claude", Path.cwd())
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["auth"], "logged_out")
+
+    def test_claude_auth_probe_requires_success_exit(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["claude"], 1, stdout='{"loggedIn": true}', stderr="failed"
+        )
+        with mock.patch.object(rival, "run_command", return_value=result):
+            self.assertEqual(
+                rival.probe_auth("claude", "/fake/claude", Path.cwd()), "unknown"
+            )
+
+    def test_dangling_cursor_repair_uses_neutral_official_installer_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            link = Path(tmp) / "agent"
+            link.symlink_to(Path(tmp) / "missing")
+            with mock.patch.object(
+                rival, "candidate_binaries", return_value=[str(link)]
+            ):
+                binary, note = rival.resolve_binary("cursor")
+        self.assertIsNone(binary)
+        self.assertIn("official installer", note or "")
+        self.assertIn("user authorization", note or "")
+        self.assertNotIn("curl", note or "")
+
     def test_full_sweep_not_ok_when_every_bench_fails(self) -> None:
         broken = {
             "auth": None,
@@ -403,6 +462,19 @@ class DoctorTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def valid_state(self, root: Path) -> dict[str, object]:
+        return {
+            "bench": "claude",
+            "binary": "/recorded/claude",
+            "cwd": str(root.resolve()),
+            "effort": None,
+            "model": None,
+            "role": "review",
+            "rounds": 1,
+            "session_id": "sess-1",
+            "started_at": "2026-08-31T12:00:00+00:00",
+        }
+
     def test_refuse_overwrite_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "out.txt"
@@ -460,6 +532,9 @@ class StateTests(unittest.TestCase):
                         str(state),
                     ]
                 )
+                saved_state = json.loads(state.read_text(encoding="utf-8"))
+                saved_state["binary"] = "/mutable/untrusted/claude"
+                state.write_text(json.dumps(saved_state), encoding="utf-8")
                 resume_rc = rival.main(
                     [
                         "resume",
@@ -480,9 +555,226 @@ class StateTests(unittest.TestCase):
         self.assertEqual(start_spawn[start_spawn.index("--effort") + 1], "xhigh")
         self.assertEqual(resume_spawn[resume_spawn.index("--model") + 1], "fable")
         self.assertEqual(resume_spawn[resume_spawn.index("--effort") + 1], "xhigh")
+        self.assertEqual(resume_spawn[0], "/fake/claude")
+        self.assertNotIn("/mutable/untrusted/claude", resume_spawn)
         printed = json.loads(buf.getvalue().splitlines()[-1])
         self.assertEqual(printed["model"], "fable")
         self.assertEqual(printed["effort"], "xhigh")
+
+    def test_malformed_state_fields_raise_rival_error(self) -> None:
+        malformed = {
+            "bench": [],
+            "role": "unknown",
+            "session_id": "",
+            "cwd": "relative/path",
+            "binary": 7,
+            "rounds": True,
+            "started_at": "2026-08-31T12:00:00",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for field, value in malformed.items():
+                with self.subTest(field=field):
+                    state = self.valid_state(root)
+                    state[field] = value
+                    path = root / f"{field}.json"
+                    path.write_text(json.dumps(state), encoding="utf-8")
+                    with self.assertRaises(rival.RivalError):
+                        rival.load_state(path)
+
+    def test_malformed_resume_is_one_line_and_never_spawns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            state = self.valid_state(root)
+            state["rounds"] = "one"
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            with (
+                mock.patch.object(rival, "run_command") as spawned,
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr,
+            ):
+                rc = rival.main(
+                    [
+                        "resume",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(root / "out.txt"),
+                        "--state",
+                        str(state_path),
+                    ]
+                )
+            self.assertEqual(rc, 1)
+            spawned.assert_not_called()
+            self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+            self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_nul_state_session_and_model_are_one_line_without_spawn(self) -> None:
+        malformed = (
+            ("session_id", "sess-1\0--dangerous"),
+            ("model", "model\0--dangerous"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            for field, value in malformed:
+                with self.subTest(field=field):
+                    state = self.valid_state(root)
+                    state[field] = value
+                    state_path = root / f"{field}.state.json"
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    with (
+                        mock.patch.object(rival, "run_command") as spawned,
+                        mock.patch.object(
+                            sys, "stderr", new_callable=io.StringIO
+                        ) as stderr,
+                    ):
+                        override = ["--model", "safe-model"] if field == "model" else []
+                        rc = rival.main(
+                            [
+                                "resume",
+                                "--prompt-file",
+                                str(prompt),
+                                "--out",
+                                str(root / f"{field}.out.txt"),
+                                "--state",
+                                str(state_path),
+                                *override,
+                            ]
+                        )
+                    self.assertEqual(rc, 1)
+                    spawned.assert_not_called()
+                    self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+                    self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_existing_output_and_state_fail_before_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            for occupied_arg in ("out", "state"):
+                with self.subTest(occupied_arg=occupied_arg):
+                    out = root / f"{occupied_arg}-out.txt"
+                    state = root / f"{occupied_arg}-state.json"
+                    occupied = out if occupied_arg == "out" else state
+                    occupied.write_text("preserve", encoding="utf-8")
+                    with (
+                        mock.patch.object(rival, "run_command") as spawned,
+                        mock.patch.object(sys, "stderr", new_callable=io.StringIO),
+                    ):
+                        rc = rival.main(
+                            [
+                                "--cwd",
+                                str(root),
+                                "start",
+                                "--bench",
+                                "claude",
+                                "--role",
+                                "review",
+                                "--prompt-file",
+                                str(prompt),
+                                "--out",
+                                str(out),
+                                "--state",
+                                str(state),
+                            ]
+                        )
+                    self.assertEqual(rc, 1)
+                    spawned.assert_not_called()
+                    self.assertEqual(occupied.read_text(encoding="utf-8"), "preserve")
+
+    def test_existing_codex_last_message_is_preserved_without_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            out = root / "round.txt"
+            last_message = out.with_suffix(out.suffix + ".codex-last")
+            last_message.write_text("preserve", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    rival, "resolve_binary", return_value=("/fake/codex", None)
+                ),
+                mock.patch.object(rival, "run_command") as spawned,
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO),
+            ):
+                rc = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "codex",
+                        "--role",
+                        "review",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(out),
+                        "--state",
+                        str(root / "state.json"),
+                    ]
+                )
+            self.assertEqual(rc, 1)
+            spawned.assert_not_called()
+            self.assertEqual(last_message.read_text(encoding="utf-8"), "preserve")
+
+    def test_codex_state_last_message_collision_preserves_state_without_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            out = root / "round.txt"
+            state_path = out.with_suffix(out.suffix + ".codex-last")
+            state = self.valid_state(root)
+            state["bench"] = "codex"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            original = state_path.read_bytes()
+            with (
+                mock.patch.object(
+                    rival, "resolve_binary", return_value=("/fake/codex", None)
+                ),
+                mock.patch.object(rival, "run_command") as spawned,
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr,
+            ):
+                rc = rival.main(
+                    [
+                        "resume",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(out),
+                        "--state",
+                        str(state_path),
+                    ]
+                )
+            self.assertEqual(rc, 1)
+            spawned.assert_not_called()
+            self.assertEqual(state_path.read_bytes(), original)
+            self.assertFalse(out.exists())
+            self.assertIn("pairwise distinct", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+
+
+class TimeoutTests(unittest.TestCase):
+    def test_timeout_accepts_inclusive_bounds(self) -> None:
+        parser = rival.build_parser()
+        for value in (30, 3600):
+            with self.subTest(value=value):
+                args = parser.parse_args(["--timeout", str(value), "doctor"])
+                self.assertEqual(args.timeout, value)
+
+    def test_timeout_rejects_values_outside_bounds(self) -> None:
+        for value in (29, 3601):
+            with (
+                self.subTest(value=value),
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO),
+                self.assertRaises(SystemExit),
+            ):
+                rival.build_parser().parse_args(["--timeout", str(value), "doctor"])
 
 
 if __name__ == "__main__":

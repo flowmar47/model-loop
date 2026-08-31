@@ -73,6 +73,11 @@ Otherwise ask once, with a recommendation:
 - Invoked in AGY → recommend `claude`
 - Invoked in Pi or any harness that is not itself a rival bench → recommend `codex` or `claude`
 
+As part of confirming the reviewer, disclose the data boundary: read-only controls prevent
+the rival from editing files, but the selected external provider can receive `PLAN_FILE` and
+any repository material its rival CLI reads. Include this in the same pre-round veto; do not
+turn it into a separate workflow phase.
+
 **Hard rule:** reviewer ≠ invoking harness. Cursor the editor and Cursor CLI (`agent`)
 are the same bench. AGY the app and `agy` the CLI are the same bench. Pi is not a rival
 bench, so all four reviewers are legal. Do not spawn a sibling of yourself as the critic.
@@ -92,8 +97,8 @@ Tunables (args override defaults):
 | `research` | ask | `none` / `web` / `deep` |
 | `PROOF_CMD` | from spec | Exact command that counts as proof |
 
-Echo resolved benches, CLI versions, and tunables. If the user objects, stop before
-burning a review round. Pin no `--model` unless they asked. When they did, pass
+Echo resolved benches, CLI versions, tunables, and the review data boundary. If the user
+objects, stop before burning a review round. Pin no `--model` unless they asked. When they did, pass
 `--model` and `--effort` through `rival.py start|resume` (effort is claude/agy
 only). Do not invent CLI flags.
 
@@ -131,10 +136,10 @@ code recon: prior art, a default stack plus one alternative, 3–5 known pitfall
 
 Use this session's web tools. Do not require a Claude-only workflow runtime.
 
-**Skill inventory** (both terrains): list folder names + first-line descriptions from
-`~/.claude/skills/`, `~/.cursor/skills/`, `~/.codex/skills/`, `~/.agents/skills/`,
-`~/.pi/agent/skills/`. Record domain matches as *proposed* toolchain entries. Nothing
-loads unless `PLAN.md`'s `## Toolchain` names it and survives review.
+**Skill inventory** (both terrains): search the available skill catalog using terms from
+the task. Inspect only task-matched entries, and open no more than three full skill files
+unless `PLAN.md` justifies why more are necessary. Record matches as *proposed* toolchain
+entries. Nothing loads unless `PLAN.md`'s `## Toolchain` names it and survives review.
 
 **Assumptions Ledger** — one batch, not drip-fed:
 

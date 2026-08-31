@@ -82,6 +82,12 @@ BINARIES = {
     "claude": ("claude",),
     "codex": ("codex",),
 }
+AUTH_OK = {
+    "agy": "ok",
+    "cursor": "ok",
+    "claude": "logged_in",
+    "codex": "logged_in",
+}
 
 
 def utc_now() -> str:
@@ -110,8 +116,8 @@ def resolve_binary(bench: str) -> tuple[str | None, str | None]:
         located = Path(path)
         if located.is_symlink() and not located.exists():
             notes.append(
-                f"{path} is a dangling symlink — reinstall Cursor CLI with "
-                "`curl https://cursor.com/install -fsS | bash` if you want the cursor rival"
+                f"{path} is a dangling symlink — after user authorization, "
+                "use Cursor's official installer if you want the cursor rival"
             )
             continue
         resolved = located.resolve()
@@ -202,7 +208,7 @@ def doctor_one(bench: str, cwd: Path) -> dict[str, Any]:
         flags = missing_flags(bench, help_text(binary, cwd))
         report["missing_flags"] = flags
         report["auth"] = probe_auth(bench, binary, cwd)
-        report["ok"] = not flags
+        report["ok"] = not flags and report["auth"] == AUTH_OK[bench]
     except RivalError as exc:
         report["note"] = str(exc)
     return report
@@ -211,6 +217,8 @@ def doctor_one(bench: str, cwd: Path) -> dict[str, Any]:
 def probe_auth(bench: str, binary: str, cwd: Path) -> str:
     if bench == "claude":
         result = run_command((binary, "auth", "status", "--json"), cwd=cwd, timeout=20)
+        if result.returncode != 0:
+            return "unknown"
         try:
             payload = json.loads(result.stdout or "{}")
         except json.JSONDecodeError:
@@ -219,7 +227,7 @@ def probe_auth(bench: str, binary: str, cwd: Path) -> str:
     if bench == "codex":
         result = run_command((binary, "login", "status"), cwd=cwd, timeout=20)
         text = (result.stdout or "") + (result.stderr or "")
-        if "Logged in" in text:
+        if result.returncode == 0 and "Logged in" in text:
             return "logged_in"
         return "unknown"
     if bench == "cursor":
@@ -253,12 +261,85 @@ def load_state(path: Path) -> dict[str, Any]:
         raise RivalError(f"invalid state file {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise RivalError(f"state is not an object: {path}")
-    for key in ("bench", "role", "session_id", "cwd", "binary"):
-        if not payload.get(key):
+    for key in ("bench", "role", "session_id", "cwd", "binary", "rounds", "started_at"):
+        if key not in payload:
             raise RivalError(f"state missing {key}: {path}")
-    if payload["bench"] not in BENCHES or payload["role"] not in ROLES:
+    if (
+        not isinstance(payload["bench"], str)
+        or not isinstance(payload["role"], str)
+        or payload["bench"] not in BENCHES
+        or payload["role"] not in ROLES
+    ):
         raise RivalError(f"state has unknown bench/role: {path}")
+    for key in ("session_id", "binary"):
+        if (
+            not isinstance(payload[key], str)
+            or not payload[key].strip()
+            or "\0" in payload[key]
+        ):
+            raise RivalError(f"state has invalid {key}: {path}")
+    for key in ("model", "effort"):
+        value = payload.get(key)
+        if value is not None and (
+            not isinstance(value, str) or not value.strip() or "\0" in value
+        ):
+            raise RivalError(f"state has invalid {key}: {path}")
+    cwd = payload["cwd"]
+    if (
+        not isinstance(cwd, str)
+        or not cwd.strip()
+        or "\0" in cwd
+        or not Path(cwd).is_absolute()
+    ):
+        raise RivalError(f"state has invalid cwd: {path}")
+    rounds = payload["rounds"]
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
+        raise RivalError(f"state has invalid rounds: {path}")
+    started_at = payload["started_at"]
+    try:
+        if not isinstance(started_at, str) or not started_at.strip():
+            raise ValueError("started_at is not a non-empty string")
+        parsed_started_at = datetime.fromisoformat(started_at)
+        if parsed_started_at.tzinfo is None or parsed_started_at.utcoffset() is None:
+            raise ValueError("started_at has no timezone")
+    except ValueError as exc:
+        raise RivalError(f"state has invalid started_at: {path}") from exc
     return payload
+
+
+def preflight_new_path(path: Path, *, label: str) -> None:
+    if path.is_symlink():
+        raise RivalError(f"refusing symlink for {label}: {path}")
+    if path.exists():
+        raise RivalError(f"refusing to overwrite {label} {path}")
+
+
+def preflight_state_path(path: Path, *, resume: bool) -> None:
+    if path.is_symlink():
+        raise RivalError(f"refusing symlink for state: {path}")
+    if resume:
+        if not path.is_file():
+            raise RivalError(f"resume state does not exist or is not a file: {path}")
+    else:
+        preflight_new_path(path, label="state")
+
+
+def require_distinct_paths(paths: Sequence[Path]) -> None:
+    resolved = [path.resolve(strict=False) for path in paths]
+    if len(set(resolved)) != len(resolved):
+        raise RivalError(
+            "output, state, and Codex last-message paths must be pairwise distinct"
+        )
+
+
+def bounded_timeout(value: str) -> int:
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be an integer") from exc
+    if seconds < 30 or seconds > 3600:
+        raise argparse.ArgumentTypeError("timeout must be between 30 and 3600 seconds")
+    return seconds
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -286,7 +367,7 @@ def write_text(path: Path, text: str) -> None:
 def coerce_pin(flag: str, value: Any) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip() or "\0" in value:
         raise RivalError(
             f"{flag} must be a non-empty string, got {value!r} — omit the flag or pass a value"
         )
@@ -433,6 +514,10 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
     state_path = Path(args.state)
     prompt = read_prompt(prompt_path)
     timeout = int(args.timeout)
+    preflight_new_path(out_path, label="output")
+    preflight_state_path(state_path, resume=resume)
+    if out_path.resolve(strict=False) == state_path.resolve(strict=False):
+        raise RivalError("output and state paths must be distinct")
 
     if resume:
         state = load_state(state_path)
@@ -440,11 +525,13 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         role = str(state["role"])
         session_id = str(state["session_id"])
         cwd = Path(str(state["cwd"]))
-        binary = str(state["binary"])
         rounds = int(state.get("rounds", 0)) + 1
         started_at = str(state.get("started_at") or utc_now())
         model = coerce_pin("--model", args.model) or coerce_pin("--model", state.get("model"))
         effort = coerce_pin("--effort", args.effort) or coerce_pin("--effort", state.get("effort"))
+        binary, note = resolve_binary(bench)
+        if binary is None:
+            raise RivalError(f"{bench} CLI not found on resume: {note}")
     else:
         bench = args.bench
         role = args.role
@@ -468,10 +555,14 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         raise RivalError(f"cwd is not a directory: {cwd}")
 
     last_message = out_path.with_suffix(out_path.suffix + ".codex-last") if bench == "codex" else None
+    require_distinct_paths(
+        (out_path, state_path, last_message)
+        if last_message is not None
+        else (out_path, state_path)
+    )
     if last_message is not None:
+        preflight_new_path(last_message, label="Codex last-message output")
         last_message.parent.mkdir(parents=True, exist_ok=True)
-        if last_message.exists():
-            last_message.unlink()
     argv, stdin_bytes, close_stdin = build_argv(
         bench=bench,
         binary=binary,
@@ -573,7 +664,7 @@ def cmd_whoami(_: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Spawn a rival coding CLI for model-loop.")
     parser.add_argument("--cwd", default=".", help="working directory for the spawned CLI")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
+    parser.add_argument("--timeout", type=bounded_timeout, default=DEFAULT_TIMEOUT_S)
     sub = parser.add_subparsers(dest="command", required=True)
 
     doctor = sub.add_parser("doctor", help="check binaries, flags, and auth")

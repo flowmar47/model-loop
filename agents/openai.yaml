@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Loop"
+  short_description: "Cross-model plan review and build inspection"
+  default_prompt: "Use $model-loop to harden this plan with a different rival bench before implementation."

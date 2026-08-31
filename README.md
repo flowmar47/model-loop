@@ -6,16 +6,16 @@ Adapted from [claudex-loop](https://github.com/chaseai-yt/claudex-loop) (MIT).
 
 ## Install
 
-Clone this repo as a skill directory (HTTPS or SSH):
+Recommended shared installation across supported agent harnesses:
+
+```bash
+npx skills add https://github.com/flowmar47/model-loop --global --all
+```
+
+For a manual fallback, clone once and link only the harnesses you use:
 
 ```bash
 git clone https://github.com/flowmar47/model-loop.git ~/.agents/skills/model-loop
-# or: git clone git@github.com:flowmar47/model-loop.git ~/.agents/skills/model-loop
-```
-
-Then symlink into the harness you use:
-
-```bash
 ln -sfn ~/.agents/skills/model-loop ~/.cursor/skills/model-loop
 ln -sfn ~/.agents/skills/model-loop ~/.claude/skills/model-loop
 ln -sfn ~/.agents/skills/model-loop ~/.codex/skills/model-loop
@@ -47,6 +47,8 @@ You are the planner. Pick a rival that is not this harness. No code is written u
 
 Review and inspect are read-only via each CLI's plan/sandbox mode. Build is write. The spawned builder never commits.
 
+Read-only controls prevent a rival from editing files; they do not prevent data transmission. The selected external provider can receive `PLAN.md` and any repository material its rival CLI reads. Model Loop discloses this boundary with reviewer selection before the first rival round.
+
 ## Tunables
 
 Pass on the slash command, e.g. `/model-loop reviewer=codex inspect=off`.
@@ -59,7 +61,7 @@ Pass on the slash command, e.g. `/model-loop reviewer=codex inspect=off`.
 
 The rest (`MAX_ROUNDS`, research depth, file names, …) live in [SKILL.md](SKILL.md).
 
-Doctor (checks rival CLIs; does not call models):
+Doctor checks required flags and each CLI's cheap authentication probe; it does not call a model:
 
 ```bash
 python3 ~/.agents/skills/model-loop/scripts/rival.py doctor

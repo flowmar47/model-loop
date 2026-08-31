@@ -8,8 +8,8 @@ page over either.
 Never pin `--model` / `-m` unless the user asked. Never resume with `--continue` or
 `--last`. Always keep an explicit session id in the state file.
 
-Timeouts: 10 minutes per round by default (`rival.py --timeout <seconds>`; agy's
-`--print-timeout` is derived from it). Codex `exec` reads stdin *in addition to* a prompt
+Timeouts: 10 minutes per round by default; `rival.py --timeout <seconds>` accepts 30 through
+3600 seconds, and agy's `--print-timeout` is derived from it. Codex `exec` reads stdin *in addition to* a prompt
 argument — under a non-TTY driver that hangs forever unless stdin is closed
 (`< /dev/null` / `stdin=DEVNULL`).
 
@@ -25,6 +25,9 @@ env -u ANTHROPIC_BASE_URL -u OPENAI_BASE_URL python3 ~/.agents/skills/model-loop
 
 `rival.py start|resume` accept `--model` and `--effort`. They persist in the
 session state so resume replays them.
+
+Resume trusts the recorded bench and exact session id, then resolves that bench's current
+executable. The stored `binary` value is provenance only and is never executed on resume.
 
 | Bench    | Model flag | Effort |
 |----------|------------|--------|
@@ -80,15 +83,17 @@ Do **not** pass `--dangerously-skip-permissions`.
 ### codex
 
 ```bash
-codex exec -s read-only --json -o /tmp/verdict.txt "$(cat prompt.txt)" \
+codex exec -s read-only --json -o /tmp/review-round-1.last.txt "$(cat prompt.txt)" \
   < /dev/null
 # resume (resume rejects -s; force read-only via -c):
 codex exec resume "$ID" -c sandbox_mode="read-only" --json \
-  -o /tmp/verdict.txt "$(cat prompt.txt)" < /dev/null
+  -o /tmp/review-round-2.last.txt "$(cat prompt.txt)" < /dev/null
 ```
 
 Session id: JSONL line `{"type":"thread.started","thread_id":"..."}`.
-Last message: `-o` file. Do not use `--yolo` on `codex exec`.
+Last message: a fresh `-o` file for every round. Existing last-message artifacts are preserved,
+and the runner requires a new `--out` path instead of deleting them. Do not use `--yolo` on
+`codex exec`.
 
 ## Build (write)
 
@@ -116,10 +121,10 @@ claude -p --dangerously-skip-permissions --output-format json \
 
 ```bash
 codex exec --dangerously-bypass-approvals-and-sandbox --json \
-  -o /tmp/build.txt - < prompt.txt
+  -o /tmp/build-round-1.last.txt - < prompt.txt
 # resume:
 codex exec resume "$ID" --dangerously-bypass-approvals-and-sandbox --json \
-  -o /tmp/build.txt - < prompt.txt
+  -o /tmp/build-round-2.last.txt - < prompt.txt
 ```
 
 Run from the repo root (`resume` has no `-C`).
@@ -128,8 +133,9 @@ Run from the repo root (`resume` has no `-C`).
 
 `rival.py doctor` confirms each binary exists, `--help` contains the flags the
 adapter needs (including `--model`, and `--effort` on agy/claude), and (where
-cheap) that the CLI is authenticated. On a full sweep the top-level `ok` means
+cheap) that the CLI returns its known-good authenticated state. A bench is `ok` only when
+both its flags and authentication probe pass. On a full sweep the top-level `ok` means
 at least one bench is usable as a rival; pass `--bench <alias>` to gate on a
-specific one (exits non-zero on failure). A dangling `~/.local/bin/agent` symlink is
-a Cursor CLI miss — reinstall with `curl https://cursor.com/install -fsS | bash`
-only if the user asks.
+specific one (exits non-zero on failure). A dangling `~/.local/bin/agent` symlink is a
+Cursor CLI miss. After user authorization, use Cursor's official installer if that rival is
+needed; the runner never executes an installer.
