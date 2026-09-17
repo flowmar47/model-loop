@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -217,14 +218,14 @@ class ArgvTests(unittest.TestCase):
             prompt="look at PLAN.md",
             session_id=None,
             last_message=None,
-            model="fable",
-            effort="xhigh",
+            model="example-model",
+            effort="example-effort",
         )
         self.assertEqual(argv[-1], "look at PLAN.md")
         self.assertIn("--model", argv)
-        self.assertEqual(argv[argv.index("--model") + 1], "fable")
+        self.assertEqual(argv[argv.index("--model") + 1], "example-model")
         self.assertIn("--effort", argv)
-        self.assertEqual(argv[argv.index("--effort") + 1], "xhigh")
+        self.assertEqual(argv[argv.index("--effort") + 1], "example-effort")
 
     def test_cursor_rejects_effort(self) -> None:
         with self.assertRaises(rival.RivalError):
@@ -235,7 +236,7 @@ class ArgvTests(unittest.TestCase):
                 prompt="look",
                 session_id=None,
                 last_message=None,
-                effort="xhigh",
+                effort="example-effort",
             )
 
     def test_codex_rejects_effort(self) -> None:
@@ -250,7 +251,19 @@ class ArgvTests(unittest.TestCase):
                 effort="high",
             )
 
-    def test_agy_rejects_xhigh_effort(self) -> None:
+    def test_agy_passes_unknown_effort_until_live_help_is_applied(self) -> None:
+        argv, _, _ = rival.build_argv(
+            bench="agy",
+            binary="/bin/agy",
+            role="review",
+            prompt="look",
+            session_id=None,
+            last_message=None,
+            effort="example-effort",
+        )
+        self.assertEqual(argv[argv.index("--effort") + 1], "example-effort")
+
+    def test_agy_rejects_effort_absent_from_live_help(self) -> None:
         with self.assertRaises(rival.RivalError) as ctx:
             rival.build_argv(
                 bench="agy",
@@ -259,13 +272,80 @@ class ArgvTests(unittest.TestCase):
                 prompt="look",
                 session_id=None,
                 last_message=None,
-                effort="xhigh",
+                effort="example-effort",
+                allowed_efforts=frozenset({"low", "medium", "high"}),
             )
-        self.assertIn("update the enum in rival.py", str(ctx.exception))
+        self.assertIn("from this CLI's --help", str(ctx.exception))
+        self.assertNotIn("update the enum in rival.py", str(ctx.exception))
 
     def test_claude_required_help_includes_effort(self) -> None:
         self.assertIn("--effort", rival.REQUIRED_HELP["claude"])
         self.assertIn("--model", rival.REQUIRED_HELP["claude"])
+
+    def test_parse_effort_values_from_live_help_not_a_snapshot(self) -> None:
+        agy = rival.parse_effort_values("  --effort `low|medium|high`\n")
+        self.assertEqual(agy, frozenset({"low", "medium", "high"}))
+        claude = rival.parse_effort_values(
+            "--effort  Effort level (low, medium, high, xhigh, max, example-effort)\n"
+        )
+        self.assertIn("example-effort", claude or frozenset())
+        self.assertIn("max", claude or frozenset())
+        self.assertIsNone(rival.parse_effort_values("--effort VALUE\n"))
+        self.assertIsNone(rival.parse_effort_values("no effort flag here\n"))
+
+    def test_run_round_accepts_effort_added_to_live_help(self) -> None:
+        captured: list[list[str]] = []
+        claude_json = json.dumps(
+            {
+                "type": "result",
+                "session_id": "sess-help",
+                "result": "ok\nVERDICT: APPROVED",
+            }
+        )
+
+        def fake_run(argv, **_kwargs):
+            captured.append(list(argv))
+            if "--help" in argv:
+                stdout = "--effort low, medium, high, xhigh, max, example-effort\n"
+            elif "--version" in argv:
+                stdout = "2.1.243\n"
+            else:
+                stdout = claude_json
+            return subprocess.CompletedProcess(list(argv), 0, stdout=stdout, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    rival, "resolve_binary", return_value=("/fake/claude", None)
+                ),
+                mock.patch.object(rival, "run_command", side_effect=fake_run),
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+            ):
+                rc = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "claude",
+                        "--role",
+                        "review",
+                        "--effort",
+                        "example-effort",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(root / "out.txt"),
+                        "--state",
+                        str(root / "state.json"),
+                    ]
+                )
+        self.assertEqual(rc, 0)
+        spawn = next(argv for argv in captured if "-p" in argv)
+        self.assertEqual(spawn[spawn.index("--effort") + 1], "example-effort")
 
     def test_codex_pins_model_as_dash_m(self) -> None:
         argv, _, _ = rival.build_argv(
@@ -275,11 +355,11 @@ class ArgvTests(unittest.TestCase):
             prompt="look",
             session_id=None,
             last_message=Path("/tmp/last.txt"),
-            model="gpt-5",
+            model="example-model",
         )
         self.assertEqual(argv[-1], "look")
         self.assertIn("-m", argv)
-        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5")
+        self.assertEqual(argv[argv.index("-m") + 1], "example-model")
         self.assertNotIn("--model", argv)
 
     def test_cursor_accepts_model(self) -> None:
@@ -290,17 +370,17 @@ class ArgvTests(unittest.TestCase):
             prompt="look",
             session_id=None,
             last_message=None,
-            model="composer",
+            model="example-model",
         )
         self.assertEqual(argv[-1], "look")
-        self.assertEqual(argv[argv.index("--model") + 1], "composer")
+        self.assertEqual(argv[argv.index("--model") + 1], "example-model")
 
     def test_empty_effort_is_rejected(self) -> None:
         with self.assertRaises(rival.RivalError):
             rival.coerce_pin("--effort", "")
 
     def test_pin_whitespace_is_stripped(self) -> None:
-        self.assertEqual(rival.coerce_pin("--model", "  fable  "), "fable")
+        self.assertEqual(rival.coerce_pin("--model", "  example-model  "), "example-model")
 
     def test_empty_model_flag_fails_before_spawn(self) -> None:
         spawned: list[list[str]] = []
@@ -521,9 +601,9 @@ class StateTests(unittest.TestCase):
                         "--role",
                         "review",
                         "--model",
-                        "fable",
+                        "example-model",
                         "--effort",
-                        "xhigh",
+                        "example-effort",
                         "--prompt-file",
                         str(prompt),
                         "--out",
@@ -551,15 +631,15 @@ class StateTests(unittest.TestCase):
         start_spawn = next(argv for argv in captured if "-p" in argv)
         resume_spawn = next(argv for argv in reversed(captured) if "-p" in argv)
         self.assertNotEqual(start_spawn, resume_spawn)
-        self.assertEqual(start_spawn[start_spawn.index("--model") + 1], "fable")
-        self.assertEqual(start_spawn[start_spawn.index("--effort") + 1], "xhigh")
-        self.assertEqual(resume_spawn[resume_spawn.index("--model") + 1], "fable")
-        self.assertEqual(resume_spawn[resume_spawn.index("--effort") + 1], "xhigh")
+        self.assertEqual(start_spawn[start_spawn.index("--model") + 1], "example-model")
+        self.assertEqual(start_spawn[start_spawn.index("--effort") + 1], "example-effort")
+        self.assertEqual(resume_spawn[resume_spawn.index("--model") + 1], "example-model")
+        self.assertEqual(resume_spawn[resume_spawn.index("--effort") + 1], "example-effort")
         self.assertEqual(resume_spawn[0], "/fake/claude")
         self.assertNotIn("/mutable/untrusted/claude", resume_spawn)
         printed = json.loads(buf.getvalue().splitlines()[-1])
-        self.assertEqual(printed["model"], "fable")
-        self.assertEqual(printed["effort"], "xhigh")
+        self.assertEqual(printed["model"], "example-model")
+        self.assertEqual(printed["effort"], "example-effort")
 
     def test_malformed_state_fields_raise_rival_error(self) -> None:
         malformed = {
@@ -775,6 +855,30 @@ class TimeoutTests(unittest.TestCase):
                 self.assertRaises(SystemExit),
             ):
                 rival.build_parser().parse_args(["--timeout", str(value), "doctor"])
+
+
+class SkillDocsTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parent.parent
+    PINNED_SKU = re.compile(
+        r"\b(?:gpt-[0-9]|o[1-9]|claude[- ]?(?:opus|sonnet|haiku)[- ]?[0-9]"
+        r"|gemini[- ]?[0-9]|grok[- ]?[0-9]|fable)\b",
+        re.IGNORECASE,
+    )
+
+    def test_skill_does_not_pin_skus_or_frozen_efforts(self) -> None:
+        for name in ("SKILL.md", "README.md", "adapters.md"):
+            text = (self.ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(name=name):
+                self.assertIsNone(self.PINNED_SKU.search(text))
+                self.assertNotIn("update the enum in rival.py", text)
+                self.assertNotIn("-codex model variant", text)
+
+    def test_adapter_does_not_freeze_effort_names(self) -> None:
+        source = (self.ROOT / "scripts" / "rival.py").read_text(encoding="utf-8")
+        self.assertNotIn("EFFORT_SNAPSHOT", source)
+        self.assertNotIn("EFFORT_VALUES", source)
+        self.assertNotIn("claude: low|medium|high|xhigh|max", source)
+        self.assertNotIn("update the enum in rival.py", source)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,13 @@
 ---
 name: model-loop
 description: >-
-  Four-phase cross-bench plan hardening (recon, interrogate, rival review, optional build +
-  inspection). The harness this skill is invoked in (Cursor, Pi, Codex, Claude Code, AGY, …)
-  is the planner — do not spawn a second planner. A different CLI — agy, Cursor CLI (agent),
-  Codex, or Claude Code — attacks the locked plan read-only, then the models swap for build
-  vs inspect. Use when the user says "/model-loop", "model loop", "rival loop", "claudex this",
-  "crucible this plan", "stress-test this plan", "have agy/cursor/codex/claude review this
-  plan", or is about to build high-stakes work (auth, schema, concurrency, migrations,
-  payments, greenfield architecture) and wants alignment plus a cross-model check first.
-  NOT for trivial edits, NOT for reviewing already-written code, and NOT when planner and
-  reviewer would be the same bench.
+  Use when the user says "/model-loop", "model loop", "rival loop", "claudex this",
+  or "crucible this plan"; asks a different coding CLI (agy, Cursor agent, Codex,
+  Claude Code) to attack a plan before implementation; or is about to build
+  high-stakes work (auth, schema, concurrency, migrations, payments, greenfield
+  architecture) and needs a cross-bench check first. Not for trivial edits,
+  already-written code, missing rival CLIs, or when planner and reviewer would
+  be the same bench.
 ---
 
 # Model-Loop — Recon, Interrogate, Rival Review, Build
@@ -43,6 +40,24 @@ files are created.
 You enter at four points only: confirming the assumptions ledger, answering the interview,
 signing off the converged plan, and approving the final diff if you build. **No code is
 written until the user signs off the converged plan.**
+
+## Skip unless this loop earns its keep
+
+The value is a **different-bench critic** of a locked plan, then a builder/inspector
+swap. That is worth the ceremony for high-stakes work. It is not worth it for a local
+edit, a style nit, or "try the new model."
+
+Stay in this session and skip spawning a rival when:
+
+- the change is obvious or cheap to reverse;
+- `rival.py doctor` shows no usable other bench;
+- planner and reviewer would be the same bench;
+- the user asked to review *already-written* code (this skill plans first);
+- a sealed Anthropic-CLI packet review is what they want and the host is not
+  Anthropic-provided — that is clodex-loop.
+
+Recommend a *bench*, never a remembered model ID. Leave the rival on its CLI default
+unless the user named an exact ID the live rival can serve for the current auth.
 
 ---
 
@@ -98,9 +113,10 @@ Tunables (args override defaults):
 | `PROOF_CMD` | from spec | Exact command that counts as proof |
 
 Echo resolved benches, CLI versions, tunables, and the review data boundary. If the user
-objects, stop before burning a review round. Pin no `--model` unless they asked. When they did, pass
-`--model` and `--effort` through `rival.py start|resume` (effort is claude/agy
-only). Do not invent CLI flags.
+objects, stop before burning a review round. Pin no `--model` unless they named an exact
+ID. When they did, pass `--model` and `--effort` through `rival.py start|resume`. Effort
+values come from the rival CLI's live `--help`, not from this skill. Do not invent CLI
+flags.
 
 Run directory for session state (not part of the implementation diff). `git rev-parse`
 only prints the path — create it before writing prompt files into it:
@@ -335,7 +351,8 @@ rounds used. Commit only on yes — **this session** writes the commit, never th
 - Don't pick the same bench as planner and reviewer.
 - Don't hand-roll `codex exec` / `claude -p` / `agy -p` / `agent -p` — `rival.py` owns
   the flags (sandbox on review, write access only on build, no `--last`).
-- Don't pin a Codex `-codex` model variant on ChatGPT-account auth.
+- Don't pin a model the rival CLI cannot serve for the current auth. Omit `--model`
+  unless the user named an exact live ID.
 - Don't skip Phase 1. Don't ask questions recon already answered.
 - Don't launch deep research without an approved prompt.
 - Don't let a spawned builder commit, push, or release.
