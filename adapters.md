@@ -29,15 +29,18 @@ session state so resume replays them.
 Resume trusts the recorded bench and exact session id, then resolves that bench's current
 executable. The stored `binary` value is provenance only and is never executed on resume.
 
+`--model` is passed through on every bench (`-m` on Codex). `--effort` is passed through
+only on benches whose live `--help` lists `--effort` (currently agy and claude). Allowed
+effort tokens are parsed from that help text; a new value works as soon as the CLI
+advertises it. Do not copy effort names out of this file. If help does not enumerate
+values, the adapter forwards the string and the CLI is the source of truth.
+
 | Bench    | Model flag | Effort |
 |----------|------------|--------|
-| `agy`    | `--model`  | `--effort` `low\|medium\|high` (snapshot 2026-08-26) |
-| `claude` | `--model`  | `--effort` `low\|medium\|high\|xhigh\|max` (snapshot 2026-08-26) |
-| `cursor` | `--model`  | none — `--effort` is rejected. **Unverified against an installed binary** (author machine has a dangling `agent` symlink). Confirm with `agent --help`. |
-| `codex`  | `-m`       | none — `--effort` is rejected on purpose. `codex exec --help` has `-m`/`--model` and generic `-c`, not `--effort`. Do not invent `model_reasoning_effort`. |
-
-Unknown effort values fail in the adapter (`RivalError`) with the snapshot date.
-If your CLI's `--help` lists a new value, update the enum in `rival.py`.
+| `agy`    | `--model`  | live `--help` |
+| `claude` | `--model`  | live `--help` |
+| `cursor` | `--model`  | none — `--effort` is rejected. Confirm `--model` with `agent --help`. |
+| `codex`  | `-m`       | none — `--effort` is rejected. `codex exec --help` has `-m`/`--model`, not `--effort`. Do not invent effort flags. |
 
 ## Review / inspect (read-only)
 

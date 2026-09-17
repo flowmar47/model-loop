@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,11 +30,11 @@ DEFAULT_TIMEOUT_S = 600
 ROLES = ("review", "build", "inspect")
 BENCHES = ("agy", "cursor", "claude", "codex")
 EFFORT_BENCHES = ("agy", "claude")
-EFFORT_SNAPSHOT = "2026-08-26"
-EFFORT_VALUES = {
-    "agy": frozenset({"low", "medium", "high"}),
-    "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
-}
+_EFFORT_ENUM = re.compile(r"--effort\b[^\n]{0,240}", re.IGNORECASE)
+_EFFORT_LIST = re.compile(
+    r"[A-Za-z][A-Za-z0-9_-]*(?:\s*[|,/]\s*[A-Za-z][A-Za-z0-9_-]*)+"
+)
+_EFFORT_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 REQUIRED_HELP = {
     "agy": (
@@ -170,6 +171,16 @@ def missing_flags(bench: str, text: str) -> list[str]:
     return [flag for flag in REQUIRED_HELP[bench] if flag not in text]
 
 
+def parse_effort_values(help_text: str) -> frozenset[str] | None:
+    """Read live `--effort` enumerations from CLI help. Unknown format → None (pass through)."""
+    found: set[str] = set()
+    for match in _EFFORT_ENUM.finditer(help_text):
+        for group in _EFFORT_LIST.findall(match.group(0)):
+            found.update(token.lower() for token in _EFFORT_TOKEN.findall(group))
+    found.discard("effort")
+    return frozenset(found) if len(found) >= 2 else None
+
+
 def version_string(binary: str, cwd: Path) -> str:
     result = run_command((binary, "--version"), cwd=cwd, timeout=20)
     body = (result.stdout or result.stderr).strip()
@@ -196,6 +207,7 @@ def doctor_one(bench: str, cwd: Path) -> dict[str, Any]:
         "auth": None,
         "bench": bench,
         "binary": binary,
+        "effort_values": [],
         "missing_flags": [],
         "note": note,
         "ok": False,
@@ -205,8 +217,14 @@ def doctor_one(bench: str, cwd: Path) -> dict[str, Any]:
         return report
     try:
         report["version"] = version_string(binary, cwd)
-        flags = missing_flags(bench, help_text(binary, cwd))
+        text = help_text(binary, cwd)
+        flags = missing_flags(bench, text)
         report["missing_flags"] = flags
+        report["effort_values"] = (
+            sorted(parse_effort_values(text) or ())
+            if bench in EFFORT_BENCHES
+            else []
+        )
         report["auth"] = probe_auth(bench, binary, cwd)
         report["ok"] = not flags and report["auth"] == AUTH_OK[bench]
     except RivalError as exc:
@@ -380,6 +398,7 @@ def apply_pins(
     bench: str,
     model: str | None,
     effort: str | None,
+    allowed_efforts: frozenset[str] | None = None,
 ) -> list[str]:
     extra: list[str] = []
     if model:
@@ -392,12 +411,10 @@ def apply_pins(
             raise RivalError(
                 f"{bench} has no --effort flag — omit --effort or use claude/agy"
             )
-        known = EFFORT_VALUES[bench]
-        if effort not in known:
+        if allowed_efforts is not None and effort not in allowed_efforts:
             raise RivalError(
-                f"{bench} --effort {effort!r} is not in {sorted(known)} "
-                f"(known values as of {EFFORT_SNAPSHOT}; if your CLI's --help "
-                f"lists this value, update the enum in rival.py)"
+                f"{bench} --effort {effort!r} is not in {sorted(allowed_efforts)} "
+                "(from this CLI's --help)"
             )
         extra.extend(("--effort", effort))
     if not extra:
@@ -420,6 +437,7 @@ def build_argv(
     model: str | None = None,
     effort: str | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
+    allowed_efforts: frozenset[str] | None = None,
 ) -> tuple[list[str], bytes | None, bool]:
     """Return (argv, stdin_bytes, close_stdin). close_stdin True → DEVNULL."""
     resume = session_id is not None
@@ -440,7 +458,17 @@ def build_argv(
         if resume:
             argv.extend(("--conversation", session_id or ""))
         argv.append(prompt)
-        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
+        return (
+            apply_pins(
+                argv,
+                bench=bench,
+                model=model,
+                effort=effort,
+                allowed_efforts=allowed_efforts,
+            ),
+            None,
+            True,
+        )
     if bench == "cursor":
         argv = [binary, "-p", "--output-format", "json", "--trust"]
         if write_role:
@@ -450,7 +478,17 @@ def build_argv(
         if resume:
             argv.extend(("--resume", session_id or ""))
         argv.append(prompt)
-        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
+        return (
+            apply_pins(
+                argv,
+                bench=bench,
+                model=model,
+                effort=effort,
+                allowed_efforts=allowed_efforts,
+            ),
+            None,
+            True,
+        )
     if bench == "claude":
         argv = [binary, "-p", "--output-format", "json", "--disable-slash-commands", "--no-chrome"]
         if write_role:
@@ -460,7 +498,17 @@ def build_argv(
         if resume:
             argv.extend(("--resume", session_id or ""))
         argv.append(prompt)
-        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
+        return (
+            apply_pins(
+                argv,
+                bench=bench,
+                model=model,
+                effort=effort,
+                allowed_efforts=allowed_efforts,
+            ),
+            None,
+            True,
+        )
     if bench == "codex":
         if last_message is None:
             raise RivalError("codex requires a last-message path")
@@ -479,7 +527,17 @@ def build_argv(
                     "-",
                 )
             )
-            return apply_pins(argv, bench=bench, model=model, effort=effort), prompt.encode("utf-8"), False
+            return (
+                apply_pins(
+                    argv,
+                    bench=bench,
+                    model=model,
+                    effort=effort,
+                    allowed_efforts=allowed_efforts,
+                ),
+                prompt.encode("utf-8"),
+                False,
+            )
         if resume:
             argv = [
                 binary,
@@ -504,7 +562,17 @@ def build_argv(
                 str(last_message),
                 prompt,
             ]
-        return apply_pins(argv, bench=bench, model=model, effort=effort), None, True
+        return (
+            apply_pins(
+                argv,
+                bench=bench,
+                model=model,
+                effort=effort,
+                allowed_efforts=allowed_efforts,
+            ),
+            None,
+            True,
+        )
     raise RivalError(f"unknown bench {bench}")
 
 
@@ -563,6 +631,9 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
     if last_message is not None:
         preflight_new_path(last_message, label="Codex last-message output")
         last_message.parent.mkdir(parents=True, exist_ok=True)
+    allowed_efforts = None
+    if effort and bench in EFFORT_BENCHES:
+        allowed_efforts = parse_effort_values(help_text(binary, cwd))
     argv, stdin_bytes, close_stdin = build_argv(
         bench=bench,
         binary=binary,
@@ -573,6 +644,7 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         model=model if isinstance(model, str) else None,
         effort=effort if isinstance(effort, str) else None,
         timeout_s=timeout,
+        allowed_efforts=allowed_efforts,
     )
     result = run_command(
         argv,
@@ -683,7 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--model", help="pass through to the spawned CLI; omit to use its default")
     start.add_argument(
         "--effort",
-        help="claude: low|medium|high|xhigh|max; agy: low|medium|high",
+        help="pass through only on benches whose live --help lists --effort; omit to use the CLI default",
     )
     start.set_defaults(func=lambda a: run_round(a, resume=False))
 
@@ -694,8 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--model", help="override pinned model; default is the stored pin")
     resume.add_argument(
         "--effort",
-        help="override pinned effort; default is the stored pin "
-        "(claude: low|medium|high|xhigh|max; agy: low|medium|high)",
+        help="override pinned effort; default is the stored pin. Live values come from the CLI's --help",
     )
     resume.set_defaults(func=lambda a: run_round(a, resume=True))
     return parser

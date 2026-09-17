@@ -1,4 +1,5 @@
 # Plan Review Log: Enhance model-loop documentation and public skill repo
+> Historical record of an earlier model-loop run on this repository. Ignore model IDs recorded here.
 
 Started 2026-08-26 (local). Planner: Cursor. Reviewer: claude. Pin: model=fable effort=xhigh. MAX_ROUNDS=5.
 Run directory: `.git/model-loop`

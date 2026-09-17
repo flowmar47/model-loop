@@ -1,4 +1,6 @@
 # Plan: Enhance model-loop documentation and public skill repo
+> Historical record of an earlier model-loop run on this repository. Not the current task's plan. Ignore model IDs recorded here.
+
 _Locked via model-loop — Cursor + Ohms. Reviewer: claude (`fable`, effort `xhigh`). Round 1 REVISE incorporated._
 
 ## Goal

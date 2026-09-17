@@ -32,7 +32,9 @@ In Cursor, Claude Code, Codex, Pi, or AGY:
 /model-loop reviewer=codex
 ```
 
-You are the planner. Pick a rival that is not this harness. No code is written until you sign off the converged `PLAN.md`.
+You are the planner. Pick a rival that is not this harness. Leave it on its CLI default
+unless you named an exact live model ID. No code is written until you sign off the
+converged `PLAN.md`. Skip the loop for local or cheap-to-reverse edits.
 
 ## Phases
 
