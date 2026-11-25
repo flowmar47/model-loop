@@ -72,8 +72,54 @@ def extract_verdict(text: str) -> str | None:
         lines.pop()
     if not lines:
         return None
-    last = lines[-1]
-    return last if last in VERDICTS else None
+    candidate = lines[-1].lstrip("#").strip()
+    candidate = candidate.rstrip(".").strip()
+    candidate = candidate.strip("*_`").strip()
+    candidate = candidate.rstrip(".").strip()
+    return candidate if candidate in VERDICTS else None
+
+
+def extract_reported_model(bench: str, payload: dict[str, Any]) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("model", "model_id", "modelName", "model_name"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if bench == "claude":
+        model_usage = payload.get("modelUsage")
+        if isinstance(model_usage, dict):
+            models = [
+                key.strip()
+                for key in model_usage
+                if isinstance(key, str) and key.strip()
+            ]
+            if models:
+                return models[0] if len(models) == 1 else ", ".join(models)
+    if bench == "agy":
+        stats = payload.get("stats")
+        if isinstance(stats, dict) and isinstance(stats.get("models"), dict):
+            models = [
+                key.strip()
+                for key in stats["models"]
+                if isinstance(key, str) and key.strip()
+            ]
+            if models:
+                return models[0] if len(models) == 1 else ", ".join(models)
+    return None
+
+
+def parse_codex_reported_model(jsonl: str) -> str | None:
+    for line in jsonl.splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            model = extract_reported_model("codex", payload)
+            if model:
+                return model
+    return None
 
 
 def session_and_text(
@@ -100,4 +146,11 @@ def session_and_text(
         )
     if not isinstance(text, str):
         text = fallback_text
+    if not text.strip():
+        detail = ""
+        if bench == "agy":
+            denied = payload.get("denied_actions")
+            if denied:
+                detail = f" (denied_actions: {denied})"
+        raise RivalError(f"{bench} returned an empty response{detail}")
     return session.strip(), text

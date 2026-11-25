@@ -13,12 +13,14 @@ Timeouts: 10 minutes per round by default; `rival.py --timeout <seconds>` accept
 argument — under a non-TTY driver that hangs forever unless stdin is closed
 (`< /dev/null` / `stdin=DEVNULL`).
 
-Spawned CLIs inherit the planner's environment. A dead
+Spawned CLIs inherit the planner's environment (`rival.py` automatically strips
+`CLAUDECODE`/`CLAUDE_CODE` when spawning `claude`). A dead
 `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` (nothing listening) fails Claude with
-connection refused. Retry cleanly:
+connection refused. Pass `--unset-base-url` to `rival.py start|resume` (or `env -u`) to
+strip `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` cleanly:
 
 ```bash
-env -u ANTHROPIC_BASE_URL -u OPENAI_BASE_URL python3 ~/.agents/skills/model-loop/scripts/rival.py …
+python3 ~/.agents/skills/model-loop/scripts/rival.py start --unset-base-url …
 ```
 
 ## Model and effort pass-through
@@ -47,13 +49,16 @@ values, the adapter forwards the string and the CLI is the source of truth.
 ### agy
 
 ```bash
-agy -p --mode plan --sandbox --output-format json --print-timeout 10m \
-  "$(cat prompt.txt)"
+agy --output-format json --disable-slash-commands --add-dir "$PWD" \
+  --print-timeout 10m --mode plan --sandbox --print "$(cat prompt.txt)"
 # resume:
-agy -p --conversation "$ID" --mode plan --sandbox --output-format json \
-  --print-timeout 10m "$(cat prompt.txt)"
+agy --output-format json --disable-slash-commands --add-dir "$PWD" \
+  --print-timeout 10m --mode plan --sandbox --conversation "$ID" \
+  --print "$(cat prompt.txt)"
 ```
 
+In Cobra/Go pflag, `--print` takes the prompt value, so `--print <prompt>` is always
+placed last (after any `--model` / `--effort` flags).
 Session id: JSON `conversation_id`. Last message: JSON `response`.
 Do **not** pass `--dangerously-skip-permissions`.
 
@@ -94,8 +99,9 @@ codex exec resume "$ID" -c sandbox_mode="read-only" --json \
 ```
 
 Session id: JSONL line `{"type":"thread.started","thread_id":"..."}`.
-Last message: a fresh `-o` file for every round. Existing last-message artifacts are preserved,
-and the runner requires a new `--out` path instead of deleting them. Do not use `--yolo` on
+Last message: a fresh `-o` file for every round. Pre-existing last-message artifacts are
+preserved (preflight refuses to overwrite them), and the temporary `.codex-last` file
+created during a round is cleaned up after reading it into `--out`. Do not use `--yolo` on
 `codex exec`.
 
 ## Build (write)
@@ -103,8 +109,9 @@ and the runner requires a new `--out` path instead of deleting them. Do not use 
 ### agy
 
 ```bash
-agy -p --dangerously-skip-permissions --output-format json --print-timeout 10m \
-  "$(cat prompt.txt)"
+agy --output-format json --disable-slash-commands --add-dir "$PWD" \
+  --print-timeout 10m --mode accept-edits --dangerously-skip-permissions \
+  --print "$(cat prompt.txt)"
 ```
 
 ### cursor

@@ -66,9 +66,9 @@ unless the user named an exact ID the live rival can serve for the current auth.
 You are the planner. Name the harness you are running in, then pick a rival.
 
 Detect yourself when the environment is obvious (`CURSOR_AGENT` → cursor, `CLAUDECODE`
-→ claude, Codex/`CODEX_HOME` → codex, Antigravity/`agy` → agy, Pi session → pi). If
-uncertain, state your best guess in one line and continue — do not block Phase 0 on a
-naming debate, and do not ask the user to "choose a planner."
+→ claude, Codex/`CODEX_CI`/`CODEX_THREAD_ID` → codex, Antigravity/`agy` → agy, Pi
+session → pi). If uncertain, state your best guess in one line and continue — do not
+block Phase 0 on a naming debate, and do not ask the user to "choose a planner."
 
 Resolve `<skill-dir>` to the directory of the `SKILL.md` you loaded (clone
 default: `~/.agents/skills/model-loop`). Echo versions from:
@@ -116,7 +116,11 @@ Echo resolved benches, CLI versions, tunables, and the review data boundary. If 
 objects, stop before burning a review round. Pin no `--model` unless they named an exact
 ID. When they did, pass `--model` and `--effort` through `rival.py start|resume`. Effort
 values come from the rival CLI's live `--help`, not from this skill. Do not invent CLI
-flags.
+flags. Useful `rival.py` helpers: `--dry-run` on `start`/`resume` runs all preflight,
+binary, and `argv` checks without spawning or writing files; `status --state <path>`
+prints validated session state JSON; `--unset-base-url` on `start`/`resume` strips
+`ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` from the spawned CLI environment; and
+`--allow-same-bench` on `start` overrides the self-bench guard for testing only.
 
 Run directory for session state (not part of the implementation diff). `git rev-parse`
 only prints the path — create it before writing prompt files into it:

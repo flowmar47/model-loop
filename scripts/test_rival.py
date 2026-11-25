@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,71 @@ class ParseTests(unittest.TestCase):
 
     def test_verdict_absent(self) -> None:
         self.assertIsNone(rival.extract_verdict("no token here"))
+
+    def test_verdict_markdown_variants(self) -> None:
+        variants = (
+            "ok\n### VERDICT: APPROVED",
+            "needs work\n## **VERDICT: REVISE**",
+            "ok\n**VERDICT: APPROVED**.",
+            "fix\n**VERDICT: REVISE.**",
+            "ok\n*VERDICT: APPROVED*",
+            "fix\n_VERDICT: REVISE_",
+            "ok\n`VERDICT: APPROVED`",
+            "fix\nVERDICT: REVISE.",
+        )
+        for text in variants:
+            with self.subTest(text=text):
+                expected = "VERDICT: APPROVED" if "APPROVED" in text else "VERDICT: REVISE"
+                self.assertEqual(rival.extract_verdict(text), expected)
+
+    def test_verdict_rejects_buried_or_annotated(self) -> None:
+        for text in (
+            "The verdict is VERDICT: APPROVED",
+            "VERDICT: APPROVED — with caveats",
+            "VERDICT: APPROVED\nSee notes above.",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(rival.extract_verdict(text))
+
+    def test_empty_response_raises_and_includes_agy_denied_actions(self) -> None:
+        with self.assertRaises(rival.RivalError):
+            rival.session_and_text("claude", {"session_id": "s1", "result": "   "})
+        with self.assertRaises(rival.RivalError) as ctx:
+            rival.session_and_text(
+                "agy",
+                {
+                    "conversation_id": "conv-1",
+                    "status": "SUCCESS",
+                    "response": "",
+                    "denied_actions": ["write_file", "run_command"],
+                },
+            )
+        self.assertIn("denied_actions", str(ctx.exception))
+        self.assertIn("write_file", str(ctx.exception))
+
+    def test_extract_reported_model(self) -> None:
+        self.assertEqual(
+            rival.extract_reported_model("cursor", {"model": "cur-model"}),
+            "cur-model",
+        )
+        self.assertEqual(
+            rival.extract_reported_model(
+                "claude",
+                {"modelUsage": {"claude-primary": {"inputTokens": 10}}},
+            ),
+            "claude-primary",
+        )
+        self.assertEqual(
+            rival.extract_reported_model(
+                "agy",
+                {"stats": {"models": {"agy-primary": {"calls": 1}}}},
+            ),
+            "agy-primary",
+        )
+        self.assertEqual(
+            rival.parse_codex_reported_model('{"type":"thread.started","model":"codex-m"}\n'),
+            "codex-m",
+        )
 
     def test_missing_session_id(self) -> None:
         with self.assertRaises(rival.RivalError):
@@ -171,6 +237,7 @@ class ArgvTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--print-timeout") + 1], "90s")
 
     def test_agy_review_is_plan_sandbox_not_skip_permissions(self) -> None:
+        cwd = Path("/tmp/work")
         argv, _, _ = rival.build_argv(
             bench="agy",
             binary="/bin/agy",
@@ -178,11 +245,36 @@ class ArgvTests(unittest.TestCase):
             prompt="look",
             session_id=None,
             last_message=None,
+            model="example-model",
+            effort="high",
+            cwd=cwd,
         )
         self.assertIn("--mode", argv)
         self.assertIn("plan", argv)
         self.assertIn("--sandbox", argv)
+        self.assertIn("--disable-slash-commands", argv)
+        self.assertEqual(argv[argv.index("--add-dir") + 1], str(cwd))
         self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(argv[-2:], ["--print", "look"])
+        self.assertLess(argv.index("--model"), argv.index("--print"))
+        self.assertLess(argv.index("--effort"), argv.index("--print"))
+
+    def test_agy_build_uses_accept_edits_and_print_last(self) -> None:
+        cwd = Path("/tmp/build-dir")
+        argv, _, _ = rival.build_argv(
+            bench="agy",
+            binary="/bin/agy",
+            role="build",
+            prompt="implement",
+            session_id="conv-1",
+            last_message=None,
+            cwd=cwd,
+        )
+        self.assertEqual(argv[argv.index("--mode") + 1], "accept-edits")
+        self.assertIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(argv[argv.index("--conversation") + 1], "conv-1")
+        self.assertEqual(argv[argv.index("--add-dir") + 1], str(cwd))
+        self.assertEqual(argv[-2:], ["--print", "implement"])
 
     def test_cursor_review_is_ask_not_force(self) -> None:
         argv, _, _ = rival.build_argv(
@@ -506,6 +598,35 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("official installer", note or "")
         self.assertIn("user authorization", note or "")
         self.assertNotIn("curl", note or "")
+
+    def test_dangling_non_cursor_symlink_names_bench_without_cursor_note(self) -> None:
+        for bench in ("agy", "claude", "codex"):
+            with self.subTest(bench=bench), tempfile.TemporaryDirectory() as tmp:
+                link = Path(tmp) / bench
+                link.symlink_to(Path(tmp) / "missing")
+                with mock.patch.object(
+                    rival, "candidate_binaries", return_value=[str(link)]
+                ):
+                    binary, note = rival.resolve_binary(bench)
+                self.assertIsNone(binary)
+                self.assertIn(bench, note or "")
+                self.assertNotIn("Cursor", note or "")
+                self.assertNotIn("official installer", note or "")
+
+    def test_help_text_runs_exec_help_for_codex_js_and_bench_codex(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(list(argv), 0, stdout="--help-ok", stderr="")
+
+        with mock.patch.object(rival, "run_command", side_effect=fake_run):
+            rival.help_text("/usr/local/lib/node_modules/@openai/codex/bin/codex.js", Path.cwd())
+            rival.help_text("/custom/wrapper", Path.cwd(), bench="codex")
+        self.assertEqual(calls[0], ["/usr/local/lib/node_modules/@openai/codex/bin/codex.js", "--help"])
+        self.assertEqual(calls[1], ["/usr/local/lib/node_modules/@openai/codex/bin/codex.js", "exec", "--help"])
+        self.assertEqual(calls[2], ["/custom/wrapper", "--help"])
+        self.assertEqual(calls[3], ["/custom/wrapper", "exec", "--help"])
 
     def test_full_sweep_not_ok_when_every_bench_fails(self) -> None:
         broken = {
@@ -855,6 +976,355 @@ class TimeoutTests(unittest.TestCase):
                 self.assertRaises(SystemExit),
             ):
                 rival.build_parser().parse_args(["--timeout", str(value), "doctor"])
+
+
+class RunnerTests(unittest.TestCase):
+    def test_self_bench_guard_blocks_and_allow_same_bench_overrides(self) -> None:
+        claude_json = json.dumps(
+            {
+                "type": "result",
+                "session_id": "sess-self",
+                "result": "ok\nVERDICT: APPROVED",
+            }
+        )
+
+        def fake_run(argv, **_kwargs):
+            stdout = "2.1.243\n" if "--version" in argv else claude_json
+            return subprocess.CompletedProcess(list(argv), 0, stdout=stdout, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            with (
+                mock.patch.object(rival, "detect_planner", return_value="claude"),
+                mock.patch.object(rival, "resolve_binary", return_value=("/fake/claude", None)),
+                mock.patch.object(rival, "run_command", side_effect=fake_run) as mocked_run,
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr,
+            ):
+                rc = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "claude",
+                        "--role",
+                        "review",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(root / "out1.txt"),
+                        "--state",
+                        str(root / "state1.json"),
+                    ]
+                )
+            self.assertEqual(rc, 1)
+            mocked_run.assert_not_called()
+            self.assertIn("distinct harnesses", stderr.getvalue())
+
+            with (
+                mock.patch.object(rival, "detect_planner", return_value="claude"),
+                mock.patch.object(rival, "resolve_binary", return_value=("/fake/claude", None)),
+                mock.patch.object(rival, "run_command", side_effect=fake_run),
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+            ):
+                rc_override = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "claude",
+                        "--role",
+                        "review",
+                        "--allow-same-bench",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(root / "out2.txt"),
+                        "--state",
+                        str(root / "state2.json"),
+                    ]
+                )
+            self.assertEqual(rc_override, 0)
+
+    def test_dry_run_start_and_resume_do_not_spawn_or_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            out_start = root / "start.txt"
+            state_start = root / "start.json"
+            with (
+                mock.patch.object(rival, "resolve_binary", return_value=("/fake/codex", None)),
+                mock.patch.object(rival, "run_command") as mocked_run,
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO) as stdout,
+            ):
+                rc = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "codex",
+                        "--role",
+                        "build",
+                        "--model",
+                        "example-model",
+                        "--unset-base-url",
+                        "--dry-run",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(out_start),
+                        "--state",
+                        str(state_start),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            mocked_run.assert_not_called()
+            self.assertFalse(out_start.exists())
+            self.assertFalse(state_start.exists())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["bench"], "codex")
+            self.assertEqual(payload["role"], "build")
+            self.assertEqual(payload["cwd"], str(root.resolve()))
+            self.assertEqual(payload["model"], "example-model")
+            self.assertIsNone(payload["effort"])
+            self.assertEqual(payload["stdin_mode"], "pipe")
+            self.assertTrue(payload["unset_base_url"])
+            self.assertIn("-m", payload["argv"])
+
+            state_resume = root / "existing.json"
+            state_resume.write_text(
+                json.dumps(
+                    {
+                        "bench": "agy",
+                        "binary": "/fake/agy",
+                        "cwd": str(root.resolve()),
+                        "effort": None,
+                        "model": "example-model",
+                        "role": "review",
+                        "rounds": 1,
+                        "session_id": "conv-1",
+                        "started_at": "2026-08-31T12:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            out_resume = root / "resume.txt"
+            with (
+                mock.patch.object(rival, "resolve_binary", return_value=("/fake/agy", None)),
+                mock.patch.object(rival, "run_command") as mocked_run,
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO) as stdout,
+            ):
+                rc_resume = rival.main(
+                    [
+                        "resume",
+                        "--dry-run",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(out_resume),
+                        "--state",
+                        str(state_resume),
+                    ]
+                )
+            self.assertEqual(rc_resume, 0)
+            mocked_run.assert_not_called()
+            self.assertFalse(out_resume.exists())
+            resume_payload = json.loads(stdout.getvalue())
+            self.assertEqual(resume_payload["bench"], "agy")
+            self.assertEqual(resume_payload["stdin_mode"], "devnull")
+            self.assertFalse(resume_payload["unset_base_url"])
+            self.assertEqual(resume_payload["argv"][-2:], ["--print", "look"])
+
+    def test_status_prints_validated_state_and_rejects_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "state.json"
+            state_data = {
+                "bench": "claude",
+                "binary": "/fake/claude",
+                "cwd": str(root.resolve()),
+                "effort": None,
+                "model": None,
+                "role": "review",
+                "rounds": 2,
+                "session_id": "sess-2",
+                "started_at": "2026-08-31T12:00:00+00:00",
+            }
+            state_path.write_text(json.dumps(state_data), encoding="utf-8")
+            with mock.patch.object(sys, "stdout", new_callable=io.StringIO) as stdout:
+                rc = rival.main(["status", "--state", str(state_path)])
+            self.assertEqual(rc, 0)
+            self.assertEqual(json.loads(stdout.getvalue()), state_data)
+
+            bad_path = root / "bad.json"
+            bad_path.write_text('{"bench":"claude"}', encoding="utf-8")
+            with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+                rc_bad = rival.main(["status", "--state", str(bad_path)])
+            self.assertEqual(rc_bad, 1)
+            self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+
+    def test_env_hygiene_strips_claudecode_and_optional_base_urls(self) -> None:
+        captured_envs: list[dict[str, str] | None] = []
+        claude_json = json.dumps(
+            {
+                "type": "result",
+                "session_id": "sess-env",
+                "modelUsage": {"example-reported-model": {"inputTokens": 5}},
+                "result": "ok\nVERDICT: APPROVED",
+            }
+        )
+
+        def fake_run(argv, **kwargs):
+            if "-p" in argv:
+                captured_envs.append(kwargs.get("env"))
+                return subprocess.CompletedProcess(list(argv), 0, stdout=claude_json, stderr="")
+            return subprocess.CompletedProcess(list(argv), 0, stdout="2.1.243\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "CLAUDECODE": "1",
+                        "CLAUDE_CODE": "1",
+                        "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
+                        "OPENAI_BASE_URL": "http://127.0.0.1:8788",
+                        "KEEP_ME": "yes",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(rival, "detect_planner", return_value="unknown"),
+                mock.patch.object(rival, "resolve_binary", return_value=("/fake/claude", None)),
+                mock.patch.object(rival, "run_command", side_effect=fake_run),
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO) as stdout,
+            ):
+                rc1 = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "claude",
+                        "--role",
+                        "review",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(root / "out1.txt"),
+                        "--state",
+                        str(root / "state1.json"),
+                    ]
+                )
+                rc2 = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "claude",
+                        "--role",
+                        "review",
+                        "--unset-base-url",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(root / "out2.txt"),
+                        "--state",
+                        str(root / "state2.json"),
+                    ]
+                )
+            self.assertEqual(rc1, 0)
+            self.assertEqual(rc2, 0)
+            env1, env2 = captured_envs
+            assert env1 is not None and env2 is not None
+            self.assertNotIn("CLAUDECODE", env1)
+            self.assertNotIn("CLAUDE_CODE", env1)
+            self.assertEqual(env1.get("ANTHROPIC_BASE_URL"), "http://127.0.0.1:8787")
+            self.assertEqual(env1.get("KEEP_ME"), "yes")
+            self.assertNotIn("CLAUDECODE", env2)
+            self.assertNotIn("CLAUDE_CODE", env2)
+            self.assertNotIn("ANTHROPIC_BASE_URL", env2)
+            self.assertNotIn("OPENAI_BASE_URL", env2)
+            self.assertEqual(env2.get("KEEP_ME"), "yes")
+
+            lines = stdout.getvalue().splitlines()
+            round_out = json.loads(lines[-1])
+            self.assertIsInstance(round_out["elapsed_seconds"], float)
+            self.assertEqual(round_out["reported_model"], "example-reported-model")
+            saved_state = json.loads((root / "state2.json").read_text(encoding="utf-8"))
+            self.assertIsInstance(saved_state["elapsed_seconds"], float)
+            self.assertEqual(saved_state["reported_model"], "example-reported-model")
+
+    def test_codex_cleans_up_temp_last_message_after_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.txt"
+            prompt.write_text("look", encoding="utf-8")
+            out = root / "round.txt"
+            state = root / "state.json"
+            last_message = out.with_suffix(out.suffix + ".codex-last")
+
+            def fake_run(argv, **_kwargs):
+                if "--version" in argv:
+                    return subprocess.CompletedProcess(list(argv), 0, stdout="codex-cli 0.171.0\n", stderr="")
+                last_message.write_text("looks fine\nVERDICT: APPROVED\n", encoding="utf-8")
+                return subprocess.CompletedProcess(
+                    list(argv),
+                    0,
+                    stdout='{"type":"thread.started","thread_id":"thr_cleanup"}\n',
+                    stderr="",
+                )
+
+            with (
+                mock.patch.object(rival, "resolve_binary", return_value=("/fake/codex", None)),
+                mock.patch.object(rival, "run_command", side_effect=fake_run),
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+            ):
+                rc = rival.main(
+                    [
+                        "--cwd",
+                        str(root),
+                        "start",
+                        "--bench",
+                        "codex",
+                        "--role",
+                        "review",
+                        "--prompt-file",
+                        str(prompt),
+                        "--out",
+                        str(out),
+                        "--state",
+                        str(state),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertFalse(last_message.exists())
+            self.assertIn("VERDICT: APPROVED", out.read_text(encoding="utf-8"))
+
+    def test_run_command_timeout_kills_process_group(self) -> None:
+        fake_proc = mock.Mock()
+        fake_proc.pid = 424242
+        fake_proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd=["sleep"], timeout=30),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(subprocess, "Popen", return_value=fake_proc) as popen_mock,
+            mock.patch.object(os, "killpg") as killpg_mock,
+        ):
+            with self.assertRaises(rival.RivalError) as ctx:
+                rival.run_command(["sleep", "99"], cwd=Path.cwd(), timeout=30)
+        self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
+        killpg_mock.assert_called_once_with(424242, signal.SIGKILL)
+        self.assertIn("exceeded 30s", str(ctx.exception))
 
 
 class SkillDocsTests(unittest.TestCase):

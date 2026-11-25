@@ -12,10 +12,16 @@ Recommended shared installation across supported agent harnesses:
 npx skills add https://github.com/flowmar47/model-loop --global --all
 ```
 
-For a manual fallback, clone once and link only the harnesses you use:
+For a local clone, use `install.sh` to symlink into `~/.agents/skills`, `~/.cursor/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`, and `~/.pi/agent/skills` (supports `--list`, `--copy`, and `--uninstall`):
 
 ```bash
 git clone https://github.com/flowmar47/model-loop.git ~/.agents/skills/model-loop
+~/.agents/skills/model-loop/install.sh
+```
+
+Or link only the harnesses you use manually:
+
+```bash
 ln -sfn ~/.agents/skills/model-loop ~/.cursor/skills/model-loop
 ln -sfn ~/.agents/skills/model-loop ~/.claude/skills/model-loop
 ln -sfn ~/.agents/skills/model-loop ~/.codex/skills/model-loop
@@ -68,6 +74,8 @@ Doctor checks required flags and each CLI's cheap authentication probe; it does 
 ```bash
 python3 ~/.agents/skills/model-loop/scripts/rival.py doctor
 ```
+
+Pass `--dry-run` to `rival.py start|resume` to verify preflight checks, resolved binary, and exact `argv` as JSON without spawning the CLI or writing files. Inspect an existing session with `rival.py status --state <path>`.
 
 ## Rivals
 

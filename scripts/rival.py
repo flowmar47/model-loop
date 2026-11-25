@@ -8,8 +8,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,8 +23,10 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from parse import (
     RivalError,
+    extract_reported_model,
     extract_verdict,
     load_json_object,
+    parse_codex_reported_model,
     parse_codex_thread_id,
     session_and_text,
 )
@@ -38,6 +43,8 @@ _EFFORT_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 REQUIRED_HELP = {
     "agy": (
+        "--add-dir",
+        "--disable-slash-commands",
         "--print",
         "--output-format",
         "--conversation",
@@ -116,10 +123,16 @@ def resolve_binary(bench: str) -> tuple[str | None, str | None]:
     for path in candidate_binaries(bench):
         located = Path(path)
         if located.is_symlink() and not located.exists():
-            notes.append(
-                f"{path} is a dangling symlink — after user authorization, "
-                "use Cursor's official installer if you want the cursor rival"
-            )
+            if bench == "cursor":
+                notes.append(
+                    f"{path} is a dangling symlink — after user authorization, "
+                    "use Cursor's official installer if you want the cursor rival"
+                )
+            else:
+                notes.append(
+                    f"{path} is a dangling symlink for {bench} — "
+                    f"reinstall or fix the {bench} CLI symlink"
+                )
             continue
         resolved = located.resolve()
         if resolved.is_file() and os.access(resolved, os.X_OK):
@@ -132,6 +145,17 @@ def resolve_binary(bench: str) -> tuple[str | None, str | None]:
     return None, detail
 
 
+def build_spawn_env(bench: str, *, unset_base_url: bool = False) -> dict[str, str]:
+    env = os.environ.copy()
+    if bench == "claude":
+        env.pop("CLAUDECODE", None)
+        env.pop("CLAUDE_CODE", None)
+    if unset_base_url:
+        env.pop("ANTHROPIC_BASE_URL", None)
+        env.pop("OPENAI_BASE_URL", None)
+    return env
+
+
 def run_command(
     argv: Sequence[str],
     *,
@@ -139,29 +163,43 @@ def run_command(
     timeout: int,
     stdin: int | Any = subprocess.DEVNULL,
     input_bytes: bytes | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    stdin_arg = subprocess.PIPE if input_bytes is not None else stdin
+    input_text = input_bytes.decode("utf-8") if input_bytes is not None else None
     try:
-        return subprocess.run(
+        proc = subprocess.Popen(
             list(argv),
             cwd=cwd,
-            input=input_bytes.decode("utf-8") if input_bytes is not None else None,
-            stdin=None if input_bytes is not None else stdin,
-            capture_output=True,
+            stdin=stdin_arg,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            env=env,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise RivalError(f"binary missing: {argv[0]}") from exc
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
         raise RivalError(
             f"{argv[0]} exceeded {timeout}s — treat as a failed round, do not retry blind"
         ) from exc
+    return subprocess.CompletedProcess(
+        list(argv), proc.returncode, stdout=stdout, stderr=stderr
+    )
 
 
-def help_text(binary: str, cwd: Path) -> str:
+def help_text(binary: str, cwd: Path, *, bench: str | None = None) -> str:
     result = run_command((binary, "--help"), cwd=cwd, timeout=20)
     extra = ""
-    if Path(binary).name == "codex":
+    if bench == "codex" or Path(binary).name in {"codex", "codex.js"}:
         extra_result = run_command((binary, "exec", "--help"), cwd=cwd, timeout=20)
         extra = extra_result.stdout + extra_result.stderr
     return result.stdout + result.stderr + extra
@@ -217,7 +255,7 @@ def doctor_one(bench: str, cwd: Path) -> dict[str, Any]:
         return report
     try:
         report["version"] = version_string(binary, cwd)
-        text = help_text(binary, cwd)
+        text = help_text(binary, cwd, bench=bench)
         flags = missing_flags(bench, text)
         report["missing_flags"] = flags
         report["effort_values"] = (
@@ -234,7 +272,12 @@ def doctor_one(bench: str, cwd: Path) -> dict[str, Any]:
 
 def probe_auth(bench: str, binary: str, cwd: Path) -> str:
     if bench == "claude":
-        result = run_command((binary, "auth", "status", "--json"), cwd=cwd, timeout=20)
+        result = run_command(
+            (binary, "auth", "status", "--json"),
+            cwd=cwd,
+            timeout=20,
+            env=build_spawn_env("claude"),
+        )
         if result.returncode != 0:
             return "unknown"
         try:
@@ -360,26 +403,32 @@ def bounded_timeout(value: str) -> int:
     return seconds
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
+def _atomic_write_text(path: Path, text: str) -> None:
     try:
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     except OSError as exc:
         raise RivalError(f"failed to write {path}: {exc}") from exc
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise RivalError(f"failed to write {path}: {exc}") from exc
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        raise RivalError(f"refusing to overwrite output {path} — pass a new --out path per round")
-    tmp = path.with_name(f".{path.name}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
-    except OSError as exc:
-        raise RivalError(f"failed to write {path}: {exc}") from exc
+        raise RivalError(
+            f"refusing to overwrite output {path} — pass a new --out path per round"
+        )
+    _atomic_write_text(path, text)
 
 
 def coerce_pin(flag: str, value: Any) -> str | None:
@@ -419,6 +468,8 @@ def apply_pins(
         extra.extend(("--effort", effort))
     if not extra:
         return argv
+    if bench == "agy" and len(argv) >= 2 and argv[-2] in {"--print", "-p"}:
+        return argv[:-2] + extra + argv[-2:]
     return argv[:-1] + extra + [argv[-1]]
 
 
@@ -438,26 +489,30 @@ def build_argv(
     effort: str | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     allowed_efforts: frozenset[str] | None = None,
+    cwd: Path | None = None,
 ) -> tuple[list[str], bytes | None, bool]:
     """Return (argv, stdin_bytes, close_stdin). close_stdin True → DEVNULL."""
     resume = session_id is not None
     write_role = role == "build"
     if bench == "agy":
+        resolved_cwd = cwd if cwd is not None else Path.cwd()
         argv = [
             binary,
-            "-p",
             "--output-format",
             "json",
+            "--disable-slash-commands",
+            "--add-dir",
+            str(resolved_cwd),
             "--print-timeout",
             duration_string(timeout_s),
         ]
         if write_role:
-            argv.append("--dangerously-skip-permissions")
+            argv.extend(("--mode", "accept-edits", "--dangerously-skip-permissions"))
         else:
             argv.extend(("--mode", "plan", "--sandbox"))
         if resume:
             argv.extend(("--conversation", session_id or ""))
-        argv.append(prompt)
+        argv.extend(("--print", prompt))
         return (
             apply_pins(
                 argv,
@@ -607,6 +662,12 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
             raise RivalError(f"unknown bench {bench}")
         if role not in ROLES:
             raise RivalError(f"unknown role {role}")
+        planner = detect_planner()
+        if planner == bench and not getattr(args, "allow_same_bench", False):
+            raise RivalError(
+                f"planner and rival must be distinct harnesses (both resolved to {bench!r}); "
+                "pick a different --bench or pass --allow-same-bench to override"
+            )
         if state_path.exists():
             raise RivalError(f"refusing to overwrite state {state_path} — use resume")
         model = coerce_pin("--model", args.model)
@@ -630,10 +691,9 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
     )
     if last_message is not None:
         preflight_new_path(last_message, label="Codex last-message output")
-        last_message.parent.mkdir(parents=True, exist_ok=True)
     allowed_efforts = None
     if effort and bench in EFFORT_BENCHES:
-        allowed_efforts = parse_effort_values(help_text(binary, cwd))
+        allowed_efforts = parse_effort_values(help_text(binary, cwd, bench=bench))
     argv, stdin_bytes, close_stdin = build_argv(
         bench=bench,
         binary=binary,
@@ -645,29 +705,65 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
         effort=effort if isinstance(effort, str) else None,
         timeout_s=timeout,
         allowed_efforts=allowed_efforts,
-    )
-    result = run_command(
-        argv,
         cwd=cwd,
-        timeout=timeout,
-        stdin=subprocess.DEVNULL if close_stdin else subprocess.PIPE,
-        input_bytes=stdin_bytes,
     )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()[:800]
-        raise RivalError(
-            f"{bench} {role} exited {result.returncode}: {detail or 'no output'} "
-            "— stop and surface this; do not retry blind"
+    unset_base_url = bool(getattr(args, "unset_base_url", False))
+    if getattr(args, "dry_run", False):
+        print(
+            json.dumps(
+                {
+                    "argv": argv,
+                    "bench": bench,
+                    "cwd": str(cwd),
+                    "dry_run": True,
+                    "effort": effort if isinstance(effort, str) else None,
+                    "model": model if isinstance(model, str) else None,
+                    "ok": True,
+                    "role": role,
+                    "stdin_mode": "devnull" if close_stdin else "pipe",
+                    "unset_base_url": unset_base_url,
+                },
+                sort_keys=True,
+            )
         )
+        return 0
 
-    if bench == "codex":
-        new_session = session_id or parse_codex_thread_id(result.stdout + "\n" + result.stderr)
-        if last_message is None or not last_message.is_file():
-            raise RivalError("codex did not write -o last-message file")
-        text = last_message.read_text(encoding="utf-8")
-    else:
-        payload = load_json_object(result.stdout)
-        new_session, text = session_and_text(bench, payload)
+    if last_message is not None:
+        last_message.parent.mkdir(parents=True, exist_ok=True)
+    spawn_env = build_spawn_env(bench, unset_base_url=unset_base_url)
+    started_mono = time.monotonic()
+    reported_model: str | None = None
+    try:
+        result = run_command(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL if close_stdin else subprocess.PIPE,
+            input_bytes=stdin_bytes,
+            env=spawn_env,
+        )
+        elapsed_seconds = round(time.monotonic() - started_mono, 2)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[:800]
+            raise RivalError(
+                f"{bench} {role} exited {result.returncode}: {detail or 'no output'} "
+                "— stop and surface this; do not retry blind"
+            )
+
+        if bench == "codex":
+            combined = result.stdout + "\n" + result.stderr
+            new_session = session_id or parse_codex_thread_id(combined)
+            reported_model = parse_codex_reported_model(combined)
+            if last_message is None or not last_message.is_file():
+                raise RivalError("codex did not write -o last-message file")
+            text = last_message.read_text(encoding="utf-8")
+        else:
+            payload = load_json_object(result.stdout)
+            new_session, text = session_and_text(bench, payload)
+            reported_model = extract_reported_model(bench, payload)
+    finally:
+        if last_message is not None:
+            last_message.unlink(missing_ok=True)
 
     write_text(out_path, text)
     write_json(
@@ -677,7 +773,9 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
             "binary": binary,
             "cwd": str(cwd),
             "effort": effort if isinstance(effort, str) else None,
+            "elapsed_seconds": elapsed_seconds,
             "model": model if isinstance(model, str) else None,
+            "reported_model": reported_model,
             "role": role,
             "rounds": rounds,
             "session_id": new_session,
@@ -691,9 +789,11 @@ def run_round(args: argparse.Namespace, *, resume: bool) -> int:
             {
                 "bench": bench,
                 "effort": effort if isinstance(effort, str) else None,
+                "elapsed_seconds": elapsed_seconds,
                 "model": model if isinstance(model, str) else None,
                 "ok": True,
                 "out": str(out_path),
+                "reported_model": reported_model,
                 "role": role,
                 "rounds": rounds,
                 "session_id": new_session,
@@ -733,6 +833,14 @@ def cmd_whoami(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    state_path = Path(args.state)
+    preflight_state_path(state_path, resume=True)
+    state = load_state(state_path)
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Spawn a rival coding CLI for model-loop.")
     parser.add_argument("--cwd", default=".", help="working directory for the spawned CLI")
@@ -746,6 +854,10 @@ def build_parser() -> argparse.ArgumentParser:
     who = sub.add_parser("whoami", help="guess the invoking planner harness from env")
     who.set_defaults(func=cmd_whoami)
 
+    status = sub.add_parser("status", help="print validated session state JSON")
+    status.add_argument("--state", required=True)
+    status.set_defaults(func=cmd_status)
+
     start = sub.add_parser("start", help="fresh rival session")
     start.add_argument("--bench", required=True, choices=BENCHES)
     start.add_argument("--role", required=True, choices=ROLES)
@@ -757,6 +869,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--effort",
         help="pass through only on benches whose live --help lists --effort; omit to use the CLI default",
     )
+    start.add_argument(
+        "--unset-base-url",
+        action="store_true",
+        help="strip ANTHROPIC_BASE_URL and OPENAI_BASE_URL from the spawned CLI env",
+    )
+    start.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run preflight/binary/argv checks and print JSON without spawning or writing files",
+    )
+    start.add_argument(
+        "--allow-same-bench",
+        action="store_true",
+        help="allow planner and rival to share the same bench (for testing only)",
+    )
     start.set_defaults(func=lambda a: run_round(a, resume=False))
 
     resume = sub.add_parser("resume", help="resume the exact stored session")
@@ -767,6 +894,16 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument(
         "--effort",
         help="override pinned effort; default is the stored pin. Live values come from the CLI's --help",
+    )
+    resume.add_argument(
+        "--unset-base-url",
+        action="store_true",
+        help="strip ANTHROPIC_BASE_URL and OPENAI_BASE_URL from the spawned CLI env",
+    )
+    resume.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run preflight/binary/argv checks and print JSON without spawning or writing files",
     )
     resume.set_defaults(func=lambda a: run_round(a, resume=True))
     return parser
