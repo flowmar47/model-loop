@@ -1,5 +1,7 @@
 # model-loop
 
+[![CI](https://github.com/flowmar47/model-loop/actions/workflows/test.yml/badge.svg)](https://github.com/flowmar47/model-loop/actions/workflows/test.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Cross-harness plan hardening. The agent you invoke this skill **in** is the planner. A *different* CLI — AGY, Cursor CLI (`agent`), Codex, or Claude Code — attacks the locked plan. Then the models swap: one builds, the other inspects. Whoever made the thing never grades the thing.
 
 Adapted from [claudex-loop](https://github.com/chaseai-yt/claudex-loop) (MIT).

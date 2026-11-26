@@ -1,0 +1,6 @@
+model-loop Attribution Notice
+
+Portions of the protocol (four-phase recon / interrogate / review / build,
+Assumptions Ledger, decision map, and review prompt) are adapted from
+claudex-loop (https://github.com/chaseai-yt/claudex-loop), MIT License,
+Copyright (c) Chase AI.

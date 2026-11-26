@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2026 model-loop contributors
+Copyright (c) 2026 Chase AI
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,10 +20,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Portions of the protocol (four-phase recon / interrogate / review / build,
-Assumptions Ledger, decision map, and review prompt) are adapted from
-claudex-loop, https://github.com/chaseai-yt/claudex-loop, MIT License
-Copyright (c) Chase AI.
