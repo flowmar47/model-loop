@@ -3,7 +3,7 @@
 
 Started 2026-08-26 (local). Planner: Cursor. Reviewer: claude. Pin: model=fable effort=xhigh. MAX_ROUNDS=5.
 Run directory: `.git/model-loop`
-Skill: /Users/ohms/modelloop (also ~/.agents/skills/model-loop → this checkout)
+Skill: ~/modelloop (also ~/.agents/skills/model-loop → this checkout)
 
 Doctor (kickoff): agy 1.1.21 ok; cursor CLI dangling; claude 2.1.243 logged_in; codex 0.149.1 logged_in.
 
